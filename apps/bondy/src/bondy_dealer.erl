@@ -843,8 +843,6 @@ reply_error(ProcUri, CallId, Ctxt) ->
     {ok, bondy_context:t()}.
 
 dequeue_invocations(CallId, M, Fun, Ctxt) when is_function(Fun, 3) ->
-    % #{session := S} = Ctxt,
-    % Caller = bondy_session:pid(S),
     Caller = bondy_context:peer_id(Ctxt),
     case bondy_rpc_promise:dequeue_call(CallId, Caller) of
         empty ->
