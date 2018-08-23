@@ -113,7 +113,7 @@
     %% If owner of the session.
     %% This is either pid of the TCP or WS handler process or
     %% the cowboy handler.
-    pid = self()                    ::  pid() | undefined,
+    peer_pid = self()               ::  pid() | undefined,
     %% The {IP, Port} of the client
     peer                            ::  peer() | undefined,
     %% User-Agent HTTP header or WAMP equivalent
@@ -165,17 +165,19 @@
 -export([open/4]).
 -export([peer/1]).
 -export([peer_id/1]).
--export([pid/1]).
+-export([peer_pid/1]).
 -export([realm_uri/1]).
 -export([roles/1]).
 -export([size/0]).
 -export([to_details_map/1]).
 -export([update/1]).
+
 % -export([stats/0]).
 
 %% -export([features/1]).
 %% -export([subscriptions/1]).
 %% -export([registrations/1]).
+
 
 
 
@@ -328,7 +330,7 @@ peer_id(#session{} = S) ->
         S#session.realm_uri,
         S#session.node,
         S#session.id,
-        S#session.pid
+        S#session.peer_pid
     }.
 
 
@@ -338,12 +340,12 @@ peer_id(#session{} = S) ->
 %% identified by Id runs on.
 %% @end
 %% -----------------------------------------------------------------------------
--spec pid(session()) -> pid().
+-spec peer_pid(session()) -> pid().
 
-pid(Id) when is_integer(Id) ->
-    pid(fetch(Id));
+peer_pid(Id) when is_integer(Id) ->
+    peer_pid(fetch(Id));
 
-pid(#session{pid = Pid}) ->
+peer_pid(#session{peer_pid = Pid}) ->
     Pid.
 
 
@@ -581,7 +583,7 @@ when is_binary(RealmUri) orelse RealmUri == '_' ->
         id = '$3',
         realm_uri = '$1',
         node = '$2',
-        pid = '$4',
+        peer_pid = '$4',
         peer = '_',
         agent = '_',
         seq = '_',
