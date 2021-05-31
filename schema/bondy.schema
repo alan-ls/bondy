@@ -547,6 +547,11 @@ hidden
   {datatype, {flag, on, off}}
 ]}.
 
+{mapping, "admin_api.http.proxy_protocol.enabled", "bondy.admin_api_http.proxy_protocol_enabled", [
+{default, off},
+{datatype, {flag, on, off}}
+]}.
+
 %% @doc http.port is the TCP port that Bondy uses for
 %% exposing the Admin Rest APIs.
 {mapping, "admin_api.http.port", "bondy.admin_api_http.port", [
@@ -622,6 +627,11 @@ hidden
 {mapping, "admin_api.https.enabled", "bondy.admin_api_https.enabled", [
   {default, off},
   {datatype, {flag, on, off}}
+]}.
+
+{mapping, "admin_api.https.proxy_protocol.enabled", "bondy.admin_api_https.proxy_protocol_enabled", [
+{default, off},
+{datatype, {flag, on, off}}
 ]}.
 
 %% @doc https.port is the TCP port that Bondy uses for
@@ -757,6 +767,11 @@ hidden
   {datatype, {flag, on, off}}
 ]}.
 
+{mapping, "api_gateway.http.proxy_protocol.enabled", "bondy.api_gateway_http.proxy_protocol_enabled", [
+{default, off},
+{datatype, {flag, on, off}}
+]}.
+
 %% @doc api_gateway.http.port is the TCP port that Bondy uses for
 %% exposing the API Gateway managed APIs.
 {mapping, "api_gateway.http.port", "bondy.api_gateway_http.port", [
@@ -847,6 +862,11 @@ hidden
 {mapping, "api_gateway.https.enabled", "bondy.api_gateway_https.enabled", [
   {default, off},
   {datatype, {flag, on, off}}
+]}.
+
+{mapping, "api_gateway.https.proxy_protocol.enabled", "bondy.api_gateway_https.proxy_protocol_enabled", [
+{default, off},
+{datatype, {flag, on, off}}
 ]}.
 
 %% @doc api_gateway.ssl.port is the TCP port that Bondy uses for
@@ -1027,6 +1047,12 @@ hidden
 %% =============================================================================
 %% WAMP WEBSOCKET
 %% =============================================================================
+
+
+{mapping, "wamp.websocket.proxy_protocol.enabled", "bondy.wamp_websocket.proxy_protocol_enabled", [
+  {default, off},
+  {datatype, {flag, on, off}}
+]}.
 
 %% @doc Defines if Websockets PING control message functionality is enabled or
 %% not. This option affects server (Bondy) initiated pings only. Some clients
@@ -1232,6 +1258,11 @@ hidden
   {datatype, {flag, on, off}}
 ]}.
 
+{mapping, "wamp.tcp.proxy_protocol.enabled", "bondy.wamp_tcp.proxy_protocol_enabled", [
+{default, off},
+{datatype, {flag, on, off}}
+]}.
+
 %% @doc api_gateway.ssl.port is the TCP port that Bondy uses for
 %% exposing the WAMP raw socket transport
 {mapping, "wamp.tcp.port", "bondy.wamp_tcp.port", [
@@ -1309,6 +1340,11 @@ hidden
 
 
 {mapping, "wamp.tls.enabled", "bondy.wamp_tls.enabled", [
+  {default, off},
+  {datatype, {flag, on, off}}
+]}.
+
+{mapping, "wamp.tls.proxy_protocol.enabled", "bondy.wamp_tls.proxy_protocol_enabled", [
   {default, off},
   {datatype, {flag, on, off}}
 ]}.
