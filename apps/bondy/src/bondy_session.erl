@@ -88,7 +88,9 @@
     authrole                        ::  binary() | undefined,
     authroles = []                  ::  [binary()],
     authmethod                      ::  binary() | undefined,
+    peername                        ::  maybe(peername()),
     rbac_context                    ::  bondy_rbac:context() | undefined,
+    real_peername                   ::  maybe(peername()),
     %% Expiration and Limits
     created                         ::  pos_integer(),
     expires_in                      ::  pos_integer() | infinity,
