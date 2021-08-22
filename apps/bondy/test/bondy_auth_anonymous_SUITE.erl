@@ -45,7 +45,7 @@ test(Config) ->
     Roles = [],
     Peer = {{127, 0, 0, 1}, 10000},
 
-
+    %% TODO Create session and replace the following call
     {ok, Ctxt} = bondy_auth:init(1, RealmUri, anonymous, Roles, Peer),
 
     ?assertEqual(
@@ -73,6 +73,7 @@ test(Config) ->
 authenticate(Method, Uri, Roles, Peer) ->
     SessionId = 1,
     Roles = [],
+    %% TODO Create session and replace the following call
     {ok, Ctxt} = bondy_auth:init(SessionId, Uri, anonymous, Roles, Peer),
     bondy_auth:authenticate(Method, undefined, undefined, Ctxt).
 

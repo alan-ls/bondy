@@ -21,10 +21,11 @@
 %% @end
 %% -----------------------------------------------------------------------------
 -module(bondy_http_utils).
-
+-include("bondy.hrl").
 
 -export([client_ip/1]).
 -export([real_ip/1]).
+-export([real_peername/1]).
 -export([forwarded_for/1]).
 -export([set_meta_headers/1]).
 -export([meta_headers/0]).
@@ -60,6 +61,20 @@ client_ip(Req) ->
 real_ip(Req) ->
     cowboy_req:header(<<"x-real-ip">>, Req, undefined).
 
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec real_peername(cowboy_req:req()) -> maybe(peername()).
+
+real_peername(Req) ->
+    case maps:get(proxy_header, Req, #{}) of
+        #{src_address := RealIP, src_port := RealPort} ->
+            {RealIP, RealPort};
+        _ ->
+            undefined
+    end.
 
 %% -----------------------------------------------------------------------------
 %% @doc

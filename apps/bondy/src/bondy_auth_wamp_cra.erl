@@ -104,7 +104,7 @@ requirements() ->
 
 challenge(_, Ctxt, #{password := PWD} = State) ->
     try
-        UserId = bondy_auth:user_id(Ctxt),
+        Username = bondy_auth:username(Ctxt),
         Role = bondy_auth:role(Ctxt),
 
         #{
@@ -122,7 +122,7 @@ challenge(_, Ctxt, #{password := PWD} = State) ->
         %% the client needs to create a signature for.
         Microsecs = erlang:system_time(microsecond),
         Challenge = jsone:encode(#{
-            authid => UserId,
+            authid => Username,
             authrole => Role,
             authmethod => ?WAMP_CRA_AUTH,
             authprovider => ?BONDY_AUTH_PROVIDER,

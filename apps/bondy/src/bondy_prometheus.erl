@@ -376,6 +376,11 @@ get_session_labels(RealmUri, Id, Agent, Peername) ->
 
 
 %% @private
+get_socket_labels(Protocol, Transport, {_, _} = Peer) ->
+    get_socket_labels(
+        Protocol, Transport, inet_utils:peername_to_binary(Peer)
+    );
+
 get_socket_labels(Protocol, Transport, Peername) ->
     [
         node_name(),
@@ -385,29 +390,22 @@ get_socket_labels(Protocol, Transport, Peername) ->
     ].
 
 %% @private
-get_labels_values(Ctxt) ->
-    {T, FT, E} = bondy_context:subprotocol(Ctxt),
+get_labels_values(#{session := Session}) ->
+    get_labels_values(Session);
+
+get_labels_values(Session) ->
+    {T, FT, E} = bondy_session:subprotocol(Session),
     [
-        get_realm(Ctxt),
+        bondy_session:realm_uri(Session),
         node_name(),
-        bondy_context:session_id(Ctxt),
-        bondy_context:agent(Ctxt),
-        inet_utils:peername_to_binary(bondy_context:peer(Ctxt)),
+        bondy_session:id(Session),
+        bondy_session:agent(Session),
+        bondy_session:peername(Session),
         wamp,
         T,
         FT,
         E
     ].
-
-
-%% @private
-get_realm(Ctxt) ->
-    try
-        bondy_context:realm_uri(Ctxt)
-    catch
-        _:_ ->
-            undefined
-    end.
 
 
 observe_message(Metric, M, LabelsValues, Ctxt) ->

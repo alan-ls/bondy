@@ -107,7 +107,7 @@ test_1(Config) ->
     SessionId = 1,
     Roles = [],
     Peer = {{127, 0, 0, 1}, 10000},
-
+    %% TODO Create session and replace the following call
     {ok, Ctxt1} = bondy_auth:init(SessionId, RealmUri, ?U1, Roles, Peer),
 
     ?assertEqual(
@@ -135,6 +135,7 @@ test_1(Config) ->
     ),
 
     %% user 2 is not granted access from Peer (see test_2)
+    %% %% TODO Create session and replace the following call
     {ok, Ctxt2} = bondy_auth:init(SessionId, RealmUri, ?U2, Roles, Peer),
 
     ?assertEqual(
@@ -155,6 +156,7 @@ test_2(Config) ->
     Roles = [],
     Peer = {{192, 168, 1, 45}, 10000},
 
+    %% TODO Create session and replace the following call
     {ok, Ctxt2} = bondy_auth:init(SessionId, RealmUri, ?U2, Roles, Peer),
 
     ?assertEqual(
@@ -182,6 +184,7 @@ test_2(Config) ->
     ),
 
     %% user 1 is granted access from any net (see test_1)
+    %% TODO Create session and replace the following call
     {ok, Ctxt1} = bondy_auth:init(SessionId, RealmUri, ?U1, Roles, Peer),
 
     ?assertEqual(

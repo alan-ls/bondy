@@ -108,18 +108,24 @@ challenge(_, _, State) ->
     {ok, DataOut :: map(), CBState :: state()}
     | {error, Reason :: any(), CBState :: state()}.
 
-authenticate(JWT, _, Ctxt, State) ->
+authenticate(JWT, DataIn, Ctxt, State) when is_binary(JWT) ->
     RealmUri = bondy_auth:realm_uri(Ctxt),
-    UserId = bondy_auth:user_id(Ctxt),
 
     case bondy_oauth2:verify_jwt(RealmUri, JWT) of
-        {ok, #{<<"sub">> := UserId} = Claims} ->
-            {ok, Claims, State};
-        {ok, _} ->
-            %% The JWT is valid but UserId does not match the token's sub!
-            %% TODO Flag as potential threat and limit future attempts
-            {error, oauth2_invalid_grant, State};
+        {ok, Claims} ->
+            authenticate(Claims, DataIn, Ctxt, State);
         {error, Reason} ->
             {error, Reason, State}
-    end.
+    end;
 
+authenticate(Claims, _, Ctxt, State) when is_map(Claims) ->
+    Username = bondy_auth:username(Ctxt),
+
+    case maps:get(<<"sub">>, Claims) =:= Username of
+        true ->
+            {ok, Claims, State};
+        false ->
+            %% The JWT is valid but Username does not match the token's sub!
+            %% TODO Flag as potential threat and limit future attempts
+            {error, oauth2_invalid_grant, State}
+    end.

@@ -675,9 +675,9 @@ maybe_start_http(Routes, Name) ->
 -spec start_http(list(), atom()) -> ok | {error, any()}.
 
 start_http(Routes, Name) ->
-    {TransportOpts, ProtoOpts} = cowboy_opts(Routes, Name),
+    {TransportOpts, ProtocolOpts} = cowboy_opts(Routes, Name),
 
-    case cowboy:start_clear(Name, TransportOpts, ProtoOpts) of
+    case cowboy:start_clear(Name, TransportOpts, ProtocolOpts) of
         {ok, _} ->
             ok;
         {error, eaddrinuse} ->
@@ -706,7 +706,7 @@ maybe_start_https(Routes, Name) ->
 -spec start_https(list(), atom()) -> ok | {error, any()}.
 
 start_https(Routes, Name) ->
-    {TransportOpts, ProtoOpts} = cowboy_opts(Routes, Name),
+    {TransportOpts, ProtocolOpts} = cowboy_opts(Routes, Name),
 
     case cowboy:start_tls(Name, TransportOpts, ProtocolOpts) of
         {ok, _} ->

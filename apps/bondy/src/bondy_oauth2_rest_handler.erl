@@ -337,10 +337,11 @@ do_is_authorized(Req0, St0) ->
 
         RealmUri = St0#state.realm_uri,
         SessionId = bondy_utils:get_id(global),
+        %% TODO Create session and reaplce the following call
         case bondy_auth:init(SessionId, RealmUri, ClientId, all, Peer) of
             {ok, AuthCtxt} ->
                 St1 = St0#state{
-                    client_id = bondy_auth:user_id(AuthCtxt),
+                    client_id = bondy_auth:username(AuthCtxt),
                     client_auth_ctxt = AuthCtxt
                 },
                 St2 = authenticate(client, Password, St1),
@@ -378,7 +379,7 @@ do_is_authorized(Req0, St0) ->
 authenticate(client, Password, #state{client_auth_ctxt = Ctxt} = St) ->
     NewCtxt = do_authenticate(Password, Ctxt, St),
     St#state{
-        client_id = bondy_auth:user_id(NewCtxt),
+        client_id = bondy_auth:username(NewCtxt),
         client_auth_ctxt = NewCtxt
     };
 
@@ -386,7 +387,7 @@ authenticate(
     resource_onwer, Password, #state{owner_auth_ctxt = Ctxt} = St) ->
     NewCtxt = do_authenticate(Password, Ctxt, St),
     St#state{
-        client_id = bondy_auth:user_id(NewCtxt),
+        client_id = bondy_auth:username(NewCtxt),
         owner_auth_ctxt = NewCtxt
     }.
 
@@ -396,7 +397,7 @@ do_authenticate(Password, Ctxt, St) ->
     case bondy_auth:authenticate(?PASSWORD_AUTH, Password, undefined, Ctxt) of
         {ok, _, NewCtxt} ->
             St#state{
-                client_id = bondy_auth:user_id(NewCtxt),
+                client_id = bondy_auth:username(NewCtxt),
                 client_auth_ctxt = NewCtxt
             };
         {error, Reason} ->
@@ -427,11 +428,12 @@ token_flow(#{?GRANT_TYPE := <<"password">>} = Map, Req0, St0) ->
     %% This is ID will bot be used as the ID is already defined in the JWT
     SessionId = bondy_utils:get_id(global),
     try
+        %% TODO Create session and reaplce the following call
         case bondy_auth:init(SessionId, RealmUri, Username, all, Peer) of
             {ok, Ctxt} ->
                 St1 = St0#state{
                     device_id = DeviceId,
-                    client_id = bondy_auth:user_id(Ctxt),
+                    client_id = bondy_auth:username(Ctxt),
                     owner_auth_ctxt = Ctxt
                 },
                 St2 = authenticate(resource_owner, Password, St1),
@@ -510,7 +512,7 @@ issue_token(Type, Req0, St0) ->
     AuthCtxt = auth_context(Type, St0),
 
     User = bondy_auth:user(AuthCtxt),
-    Authid = bondy_auth:user_id(AuthCtxt),
+    Authid = bondy_auth:username(AuthCtxt),
     Gs = bondy_auth:roles(AuthCtxt),
     Meta = prepare_meta(Type, maps:get(<<"meta">>, User, #{}), St0),
 
@@ -551,6 +553,11 @@ jwks(Req0, St) ->
     RealmUri = St#state.realm_uri,
 
     case bondy_realm:lookup(RealmUri) of
+        {ok, Realm} ->
+            #{public_keys := Keys} = bondy_realm:to_external(Realm),
+            KeySet = #{keys => Keys},
+            Req1 = prepare_request(KeySet, #{}, Req0),
+            {true, Req1, St};
         {error, not_found} ->
             ErrorMap = maps:without(
                 [<<"status_code">>],
@@ -560,12 +567,7 @@ jwks(Req0, St) ->
                 ?HTTP_NOT_FOUND,
                 prepare_request(ErrorMap, #{}, Req0)
             ),
-            {stop, Req1, St};
-        Realm ->
-            #{public_keys := Keys} = bondy_realm:to_external(Realm),
-            KeySet = #{keys => Keys},
-            Req1 = prepare_request(KeySet, #{}, Req0),
-            {true, Req1, St}
+            {stop, Req1, St}
     end.
 
 

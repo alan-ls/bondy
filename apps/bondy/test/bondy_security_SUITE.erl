@@ -575,6 +575,7 @@ do_authenticate(Uri, Username, Secret) ->
     SessionId = 1,
     Roles = [],
     Peer = {{127,0,0,1}, 1111},
+    %% TODO Create session and replace the following call
     {ok, Ctxt} = bondy_auth:init(SessionId, Uri, Username, Roles, Peer),
     ?assertEqual(
         true,

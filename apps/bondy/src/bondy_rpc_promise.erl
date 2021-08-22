@@ -30,8 +30,8 @@
     invocation_id                           ::  id(),
     procedure_uri                           ::  uri() | undefined,
     call_id                                 ::  id() | undefined,
-    caller                                  ::  peer_id(),
-    callee                                  ::  peer_id(),
+    caller                                  ::  bondy_session:t(),
+    callee                                  ::  bondy_session:t(),
     timestamp                               :: integer()
 }).
 
@@ -39,8 +39,8 @@
 -opaque t() :: #bondy_rpc_promise{}.
 -type match_opts()      ::  #{
     id => id(),
-    caller => peer_id(),
-    callee => peer_id()
+    caller => bondy_session:t(),
+    callee => bondy_session:t()
 }.
 -type dequeue_fun()     ::  fun((empty | {ok, t()}) -> any()).
 
@@ -80,7 +80,7 @@
 %% -----------------------------------------------------------------------------
 -spec new(
     InvocationId :: id(),
-    Callee :: remote_peer_id(),
+    Callee :: bondy_session:t(),
     Ctxt :: bondy_context:t()) -> t().
 
 new(InvocationId, Callee, Caller) ->
@@ -100,7 +100,7 @@ new(InvocationId, Callee, Caller) ->
     InvocationId :: id(),
     CallId :: id(),
     ProcUri :: uri(),
-    Callee :: peer_id(),
+    Callee :: bondy_session:t(),
     Ctxt :: bondy_context:t()) -> t().
 
 new(InvocationId, CallId, ProcUri, Callee, Ctxt) ->
@@ -108,9 +108,9 @@ new(InvocationId, CallId, ProcUri, Callee, Ctxt) ->
         invocation_id = InvocationId,
         procedure_uri = ProcUri,
         call_id = CallId,
-        caller = bondy_context:peer_id(Ctxt),
+        caller = bondy_context:session_ref(Ctxt),
         callee = Callee,
-        timestamp = bondy_context:request_timestamp(Ctxt)
+        timestamp = bondy_context:timestamp(Ctxt)
     }.
 
 
@@ -132,7 +132,8 @@ call_id(#bondy_rpc_promise{call_id = Val}) -> Val.
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec callee(t()) -> peer_id().
+-spec callee(t()) -> bondy_session:t().
+
 callee(#bondy_rpc_promise{callee = Val}) -> Val.
 
 
@@ -140,7 +141,8 @@ callee(#bondy_rpc_promise{callee = Val}) -> Val.
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec caller(t()) -> peer_id().
+-spec caller(t()) -> bondy_session:t().
+
 caller(#bondy_rpc_promise{caller = Val}) -> Val.
 
 
@@ -165,7 +167,7 @@ timestamp(#bondy_rpc_promise{timestamp = Val}) -> Val.
 enqueue(RealmUri, #bondy_rpc_promise{} = P, Timeout) ->
     InvocationId = P#bondy_rpc_promise.invocation_id,
     CallId = P#bondy_rpc_promise.call_id,
-    {_, _, CallerSessionId, _} = P#bondy_rpc_promise.caller,
+    SessionId = bondy_session:id(P#bondy_rpc_promise.caller),
     %% We match realm_uri for extra validation
     Key = key(RealmUri, P),
     OnEvict = fun(_) ->
@@ -173,7 +175,7 @@ enqueue(RealmUri, #bondy_rpc_promise{} = P, Timeout) ->
             "RPC Promise evicted from queue;"
             " realm_uri=~p, caller_session_id=~p, invocation_id=~p, call_id=~p"
             " timeout=~p",
-            [RealmUri, CallerSessionId, InvocationId, CallId, Timeout]
+            [RealmUri, SessionId, InvocationId, CallId, Timeout]
         )
     end,
     Secs = erlang:round(Timeout / 1000),
@@ -185,7 +187,7 @@ enqueue(RealmUri, #bondy_rpc_promise{} = P, Timeout) ->
 %% @doc Dequeues the promise that matches the Id for the IdType in Ctxt.
 %% @end
 %% -----------------------------------------------------------------------------
--spec dequeue_call(CallId :: id(), Caller :: peer_id()) ->
+-spec dequeue_call(CallId :: id(), Caller :: bondy_session:t()) ->
     empty | {ok, t()}.
 
 dequeue_call(Id, Caller) ->
@@ -196,7 +198,9 @@ dequeue_call(Id, Caller) ->
 %% @doc Dequeues the promise that matches the Id for the IdType in Ctxt.
 %% @end
 %% -----------------------------------------------------------------------------
--spec dequeue_call(CallId :: id(), Caller :: peer_id(), Fun :: dequeue_fun()) ->
+-spec dequeue_call(CallId :: id(), Caller :: bondy_session:t(), Fun ::
+
+dequeue_fun()) ->
     any().
 
 dequeue_call(Id, Caller, Fun) ->
@@ -207,7 +211,7 @@ dequeue_call(Id, Caller, Fun) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec dequeue_invocation(CallId :: id(), Callee :: peer_id()) ->
+-spec dequeue_invocation(CallId :: id(), Callee :: bondy_session:t()) ->
     empty | {ok, t()}.
 
 dequeue_invocation(Id, Callee) ->
@@ -218,7 +222,9 @@ dequeue_invocation(Id, Callee) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec dequeue_invocation(CallId :: id(), Callee :: peer_id(), dequeue_fun()) ->
+-spec dequeue_invocation(CallId :: id(), Callee :: bondy_session:t(),
+
+dequeue_fun()) ->
     any().
 
 dequeue_invocation(Id, Callee, Fun) ->
@@ -229,7 +235,7 @@ dequeue_invocation(Id, Callee, Fun) ->
 %% @doc Reads the promise that matches the Id for the IdType in Ctxt.
 %% @end
 %% -----------------------------------------------------------------------------
--spec peek_call(CallId :: id(), Caller :: peer_id()) ->
+-spec peek_call(CallId :: id(), Caller :: bondy_session:t()) ->
     empty | {ok, t()}.
 
 peek_call(CallId, Caller) ->
@@ -240,7 +246,8 @@ peek_call(CallId, Caller) ->
 %% @doc Reads the promise that matches the Id for the IdType in Ctxt.
 %% @end
 %% -----------------------------------------------------------------------------
--spec peek_invocation(InvocationId :: id(), Callee :: peer_id()) ->
+-spec peek_invocation(
+    InvocationId :: id(), Callee :: bondy_session:t()) ->
     empty | {ok, t()}.
 
 peek_invocation(InvocationId, Callee) ->
@@ -248,15 +255,24 @@ peek_invocation(InvocationId, Callee) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Removes all pending promises from the queue for the Caller's SessionId
+%% @doc Removes all pending promises from the queue for the peer's SessionId
 %% @end
 %% -----------------------------------------------------------------------------
--spec flush(local_peer_id()) -> ok.
+-spec flush(bondy_session:t()) -> ok.
 
-flush(Caller) ->
+flush(Peer) ->
     %% This will match all promises for SessionId
-    Key = {element(1, Caller), {'_', setelement(4, Caller, '_')}, '_'},
-    _N = tuplespace_queue:remove(?INVOCATION_QUEUE, #{key => Key}),
+    RealmUri = bondy_session:realm_uri(Peer),
+    SessionId = bondy_session:id(Peer),
+
+    %% Remove all entries as callee
+    _ = tuplespace_queue:remove(
+        ?INVOCATION_QUEUE, #{key => {RealmUri, {'_', SessionId}, '_'}}
+    ),
+    %% Remove all entries as caller
+    _ = tuplespace_queue:remove(
+        ?INVOCATION_QUEUE, #{key => {RealmUri, '_', {'_', SessionId}}}
+    ),
     ok.
 
 
@@ -272,26 +288,34 @@ queue_size() ->
 key(RealmUri, #bondy_rpc_promise{} = P) ->
     CallId = P#bondy_rpc_promise.call_id,
     InvocationId = P#bondy_rpc_promise.invocation_id,
-    %% {_, Node, CallerSessionId, _} = P#bondy_rpc_promise.caller,
-    %% {_, Node, CalleeSessionId, _} = P#bondy_rpc_promise.callee,
+    CallerSessionId = bondy_session:id(
+        P#bondy_rpc_promise.caller
+    ),
+    CalleeSessionId = bondy_session:id(
+        P#bondy_rpc_promise.callee
+    ),
 
     {
         RealmUri,
-        {InvocationId, P#bondy_rpc_promise.callee},
-        {CallId, P#bondy_rpc_promise.caller}
+        {InvocationId, CalleeSessionId},
+        {CallId, CallerSessionId}
     }.
 
 
 %% @private
-call_key_pattern(CallId, {RealmUri, _, _, _} = Caller) ->
+call_key_pattern(CallId, Caller) ->
+    RealmUri = bondy_session:realm_uri(Caller),
+    SessionId = bondy_session:id(Caller),
     %% We exclude the pid from the match
-    {RealmUri, '_', {CallId, setelement(4, Caller, '_')}}.
+    {RealmUri, '_', {CallId, SessionId}}.
 
 
 %% @private
-invocation_key_pattern(InvocationId, {RealmUri, _, _, _} = Callee) ->
+invocation_key_pattern(InvocationId, Callee) ->
+    RealmUri = bondy_session:realm_uri(Callee),
+    SessionId = bondy_session:id(Callee),
     %% We exclude the pid from the match
-    {RealmUri, {InvocationId, setelement(4, Callee, '_')}, '_'}.
+    {RealmUri, {InvocationId, SessionId}, '_'}.
 
 
 %% @private

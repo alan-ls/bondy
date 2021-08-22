@@ -45,6 +45,7 @@
 -export([to_existing_atom_keys/1]).
 -export([uuid/0]).
 -export([system_time_to_rfc3339/2]).
+-export([trace_id/0]).
 
 
 
@@ -340,6 +341,12 @@ is_alphanum(C) when C >= 16#61 andalso C =< 16#7A -> true;
 is_alphanum(_)                                    -> false.
 
 
+-spec trace_id() -> binary().
+
+trace_id() ->
+    integer_to_binary(
+        rand:uniform(2 bsl 127 - 1) %% 2 shifted left by 127 == 2 ^ 128,
+    ).
 
 
 %% =============================================================================

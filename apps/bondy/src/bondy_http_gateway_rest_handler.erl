@@ -43,15 +43,16 @@
 -include("http_api.hrl").
 
 -type state() :: #{
-    api_spec => map(),
-    api_context => map(),
+    api_spec := map(),
+    api_context := map(),
+    connection := bondy_connection:t(),
     body_evaluated => boolean(),
-    session => any(),
+    session => bondy_session:t(),
     realm_uri => binary(),
     deprecated => boolean(),
     security => map(),
     is_anonymous => boolean(),
-    authid => binary() | undefined,
+
     encoding => binary() | json | msgpack
 }.
 
@@ -88,17 +89,19 @@
 %% TODO The value for 'body' is not a of type '[map,binary,tuple]' (return body)
 
 init(Req, St0) ->
-    %% TODO Set session will now be required by bondy_auth:init
-    Session = undefined, %TODO
-    % SessionId = 1,
-    % Ctxt0 = bondy_context:set_peer(
-    %     bondy_context:new(), cowboy_req:peer(Req)),
-    % Ctxt1 = bondy_context:set_session_id(SessionId, Ctxt0),
+    Conn = bondy_connection:new(?MODULE, self(), #{
+        encoding => undefined,
+        peername => cowboy_req:peer(Req),
+        real_peername => bondy_http_utils:real_peername(Req)
+    }),
+
+    APICtxt = init_api_context(Req, Conn),
+
     St1 = St0#{
-        authid => undefined,
+        session => undefined,
         body_evaluated => false,
-        api_context => init_context(Req),
-        session => Session,
+        api_context => APICtxt,
+        connection => Conn,
         encoding => undefined
     },
     {cowboy_rest, Req, St1}.
@@ -262,29 +265,15 @@ accept(Req0, St0) ->
 
 %% @private
 is_authorized(<<"OPTIONS">>, Req, St0) ->
-    St1 = St0#{is_anonymous => true},
-    {true, Req, St1};
+    %% REVIEW This overrides the security configuration in the spec!
+    authenticate(anonymous, Req, St0);
 
-is_authorized(
-    _, Req0, #{security := #{<<"type">> := <<"oauth2">>}} = St0) ->
+is_authorized(_, Req, #{security := #{<<"type">> := <<"oauth2">>}} = St0) ->
     %% TODO get auth method and status from St and validate
     %% check scopes vs action requirements
-    Token = cowboy_req:parse_header(<<"authorization">>, Req0),
+    Token = cowboy_req:parse_header(<<"authorization">>, Req),
+    authenticate(Token, Req, St0);
 
-    RealmUri = maps:get(realm_uri, St0),
-    Peer = cowboy_req:peer(Req0),
-    %% This is ID will bot be used as the ID is already defined in the JWT
-    SessionId = bondy_utils:get_id(global),
-    case bondy_auth:init(SessionId, RealmUri, Token, all, Peer) of
-        {ok, Ctxt} ->
-            authenticate(Token, Ctxt, Req0, St0);
-        {error, Reason} ->
-            Req1 = set_resp_headers(eval_headers(Req0, St0), Req0),
-            Req2 = reply_auth_error(
-                Reason, <<"Bearer">>, RealmUri, json, Req1
-            ),
-            {stop, Req2, St0}
-    end;
 
 is_authorized(_, Req, #{security := #{<<"type">> := <<"api_key">>}} = St) ->
     %% TODO get auth method and status from St and validate
@@ -296,29 +285,76 @@ is_authorized(_, Req, #{security := #{<<"type">> := <<"api_key">>}} = St) ->
     {false, Req, St};
 
 is_authorized(_, Req, #{security := _} = St0)  ->
-    St1 = St0#{is_anonymous => true},
-    {true, Req, St1}.
+    authenticate(anonymous, Req, St0).
 
 
 
-authenticate(Token, Ctxt0, Req0, St0) ->
-    case bondy_auth:authenticate(?OAUTH2_AUTH, Token, #{}, Ctxt0) of
-        {ok, Claims, _Ctxt1} when is_map(Claims) ->
-            %% The token claims
-            Ctxt = update_context(
-                {security, Claims}, maps:get(api_context, St0)
-            ),
-            St1 = maps:update(api_context, Ctxt, St0),
-            St2 = maps:put(authid, maps:get(<<"sub">>, Claims), St1),
-            {true, Req0, St2};
-        {ok, _, Ctxt1} ->
-            %% TODO Here we need the token or the session with the
-            %% token grants and not the Claim
-            St1 = St0#{
-                authid => bondy_auth:user_id(Ctxt1)
+%% @private
+%% TODO Anonymous Session
+% authenticate(anonymous, Req, St0) ->
+%     Opts = #{
+%         state_name => established,
+%         persistent => false,
+%         % authid => Authid,
+%         authmethod => ?WAMP_ANONYMOUS,
+%         authprovider => undefined,
+%         authroles => Authroles,
+%         created_timestamp => Created,
+%         expires_in => Secs
+%     },
+%     Session = bondy_session:new({http, text, undefined}, Conn, Opts),
+
+
+authenticate(Token, Req0, St0) ->
+    RealmUri = maps:get(realm_uri, St0),
+
+    case bondy_oauth2:verify_jwt(RealmUri, Token) of
+        {ok, Claims} ->
+            #{
+                <<"id">> := Id,
+                <<"sub">> := Authid,
+                <<"aud">> := RealmUri,
+                <<"groups">> := Authroles,
+                <<"iss">> := _ClientId,
+                <<"meta">> := _,
+                <<"iat">> := Created,
+                <<"exp">> := Secs
+            } = Claims,
+
+            Conn = maps:get(connection, St0),
+
+            Opts = #{
+                id => Id,
+                persistent => false,
+                authid => Authid,
+                created_timestamp => Created,
+                expires_in => Secs
             },
-            %% TODO update context
-            {true, Req0, St1};
+            Session0 = bondy_session:new({http, text, undefined}, Conn, Opts),
+            EstablishState = #{
+                id => Id,
+                is_anonymous => false,
+                persistent => false,
+                authid => Authid,
+                authmethod => ?OAUTH2_AUTH,
+                authprovider => undefined,
+                authroles => Authroles,
+                created_timestamp => Created,
+                expires_in => Secs
+            },
+            Session1 = bondy_session:set_state(
+                established, EstablishState, Session0
+            ),
+            St1 = maps:put(session, Session1, St0),
+
+            %% We include the claims in the API Context, so that the API spec
+            %% code can use it
+            Ctxt = update_context(
+                {security, Claims}, maps:get(api_context, St1)
+            ),
+            St2 = maps:update(api_context, Ctxt, St1),
+            {true, Req0, St2};
+
         {error, no_such_realm} ->
             {_, ErrorMap} = take_status_code(bondy_error:map(no_such_realm)),
             Response = #{
@@ -327,8 +363,8 @@ authenticate(Token, Ctxt0, Req0, St0) ->
             },
             Req1 = reply(?HTTP_UNAUTHORIZED, json, Response, Req0),
             {stop, Req1, St0};
+
         {error, Reason} ->
-            RealmUri = maps:get(realm_uri, St0),
             Req1 = set_resp_headers(eval_headers(Req0, St0), Req0),
             Req2 = reply_auth_error(
                 Reason, <<"Bearer">>, RealmUri, json, Req1
@@ -511,22 +547,20 @@ update_context({security, Claims}, #{<<"request">> := Req} = Ctxt) ->
 update_context({body, Body}, #{<<"request">> := _} = Ctxt0) ->
     Ctxt1 = maps_utils:put_path([<<"request">>, <<"body">>], Body, Ctxt0),
     maps_utils:put_path(
-        [<<"request">>, <<"body_length">>], byte_size(Body), Ctxt1).
+        [<<"request">>, <<"body_length">>], byte_size(Body), Ctxt1
+    ).
 
 
 %% @private
-init_context(Req) ->
-    Peer = cowboy_req:peer(Req),
-    Id = opencensus:generate_trace_id(),
-
+init_api_context(Req, Conn) ->
     M = #{
         %% Msgpack does not support 128-bit integers,
         %% so for the time being we encode it as binary string
-        <<"id">> => integer_to_binary(Id),
+        <<"id">> => bondy_utils:trace_id(),
         <<"method">> => method(Req),
         <<"scheme">> => cowboy_req:scheme(Req),
-        <<"peer">> => Peer,
-        <<"peername">> => inet_utils:peername_to_binary(Peer),
+        <<"peername">> => bondy_connection:peername(Conn),
+        <<"real_peername">> => bondy_connection:peername(Conn),
         <<"path">> => trim_trailing_slash(cowboy_req:path(Req)),
         <<"host">> => cowboy_req:host(Req),
         <<"port">> => cowboy_req:port(Req),
@@ -581,6 +615,7 @@ read_body(Req0, #{api_spec := Spec, api_context := Ctxt0} = St0, Acc) ->
     case cowboy_req:read_body(Req0, Opts) of
         {_, Data, _Req1} when byte_size(Data) > MaxLen - byte_size(Acc) ->
             throw({badarg, {body_max_bytes_exceeded, MaxLen}});
+
         {ok, Data, Req1} ->
             %% @TODO Stream Body in the future using WAMP Progressive Calls
             %% The API Spec will need a way to tell me you want to stream
@@ -591,6 +626,7 @@ read_body(Req0, #{api_spec := Spec, api_context := Ctxt0} = St0, Acc) ->
                 api_context => Ctxt1
             },
             {ok, Req1, St1};
+
         {more, Data, Req1} ->
             read_body(Req1, St0, <<Acc/binary, Data/binary>>)
     end.
@@ -713,30 +749,31 @@ perform_action(
         <<"procedure">> := P,
         <<"arguments">> := A,
         <<"arguments_kw">> := Akw,
-        <<"options">> := Opts,
+        <<"options">> := Opts0,
         %% TODO use retries
         <<"retries">> := _R,
         <<"timeout">> := CallTimeout
     } = mops_eval(Act, ApiCtxt0),
+
     RSpec = maps:get(<<"response">>, Spec),
 
+    %% If Opts.timeout overrides spec timeout if present
+    Opts = maps:merge(#{<<"timeout">> => CallTimeout}, Opts0),
+
     %% TODO We need to recreate ctxt and session from JWT
-    Peer = maps_utils:get_path([<<"request">>, <<"peer">>], ApiCtxt0),
+    Peer = maps_utils:get_path([<<"request">>, <<"peername">>], ApiCtxt0),
     RealmUri = maps:get(realm_uri, St1),
-    WampCtxt0 = wamp_context(RealmUri, Peer, St1),
-
-
-    WampCtxt = bondy_context:set_call_timeout(WampCtxt0, CallTimeout),
+    WampCtxt = wamp_context(RealmUri, Peer, St1),
 
     case bondy:call(P, Opts, A, Akw, WampCtxt) of
-        {ok, Result0, _} ->
+        {ok, Result0} ->
             %% mops uses binary keys
             Result1 = bondy_utils:to_binary_keys(Result0),
             ApiCtxt1 = update_context({result, Result1}, ApiCtxt0),
             Response = mops_eval(maps:get(<<"on_result">>, RSpec), ApiCtxt1),
             St2 = maps:update(api_context, ApiCtxt1, St1),
             {ok, Response, St2};
-        {error, WampError0, _} ->
+        {error, WampError0} ->
             StatusCode0 = uri_to_status_code(maps:get(error_uri, WampError0)),
             WampError1 = bondy_utils:to_binary_keys(WampError0),
             Error = maps:put(<<"status_code">>, StatusCode0, WampError1),
@@ -775,13 +812,13 @@ wamp_context(RealmUri, Peer, St1) ->
 
 %% @private
 maybe_anonymous(Ctxt0, #{is_anonymous := true}) ->
-    AuthId = bondy_utils:uuid(),
+    Username = bondy_utils:uuid(),
     Ctxt1 = bondy_context:set_is_anonymous(Ctxt0, true),
-    bondy_context:set_authid(Ctxt1, AuthId);
+    bondy_context:set_authid(Ctxt1, Username);
 
 maybe_anonymous(Ctxt0, St) ->
-    AuthId = maps:get(authid, St),
-    Ctxt1 = bondy_context:set_authid(Ctxt0, AuthId),
+    Username = bondy_session:username(maps:get(session, St)),
+    Ctxt1 = bondy_context:set_authid(Ctxt0, Username),
     bondy_context:set_is_anonymous(Ctxt1, false).
 
 
@@ -1092,7 +1129,6 @@ when is_binary(Prefix) orelse is_list(Prefix), is_list(Head) ->
         <<"id">> := TraceId,
         <<"method">> := Method,
         <<"scheme">> := Scheme,
-        <<"peername">> := Peername,
         <<"path">> := Path,
         %% <<"headers">> := Headers,
         <<"query_string">> := QueryString,
@@ -1111,6 +1147,7 @@ when is_binary(Prefix) orelse is_list(Prefix), is_list(Head) ->
             ", method=~s"
             ", scheme=~s"
             ", peername=~s"
+            ", real_peername=~s"
             ", path=~s"
             %% ", headers=~s"
             ", query_string=~s",
@@ -1131,7 +1168,8 @@ when is_binary(Prefix) orelse is_list(Prefix), is_list(Head) ->
         maps:get(encoding, St, undefined),
         Method,
         Scheme,
-        Peername,
+        bondy_connection:peername(maps:get(connection, St)),
+        bondy_connection:real_peername(maps:get(connection, St)),
         Path,
         %% Headers,
         QueryString,

@@ -29,7 +29,7 @@
 
 -define(BONDY_CLUSTER_CONNECTIONS,      <<"bondy.cluster.connections">>).
 -define(BONDY_CLUSTER_MEMBERS,          <<"bondy.cluster.members">>).
--define(BONDY_CLUSTER_PEER_INFO,        <<"bondy.cluster.peer_info">>).
+-define(BONDY_CLUSTER_PEER_INFO,        <<"bondy.cluster.peer_ref">>).
 -define(BONDY_CLUSTER_STATUS,           <<"bondy.cluster.status">>).
 
 -define(BONDY_HTTP_GATEWAY_ADD,         <<"bondy.http_gateway.api.add">>).

@@ -18,13 +18,19 @@
 %% =============================================================================
 -module(bondy_data_validators).
 -include_lib("wamp/include/wamp.hrl").
+-include("bondy.hrl").
+-include("bondy_security.hrl").
 
 -export([authorized_key/1]).
 -export([cidr/1]).
 -export([existing_atom/1]).
 -export([groupname/1]).
 -export([groupnames/1]).
+-export([ip_address/1]).
 -export([password/1]).
+-export([peername/1]).
+-export([permission/1]).
+-export([policy_resource/1]).
 -export([realm_uri/1]).
 -export([rolename/1]).
 -export([rolenames/1]).
@@ -32,8 +38,7 @@
 -export([strict_username/1]).
 -export([username/1]).
 -export([usernames/1]).
--export([peername/1]).
-
+-export([subprotocol/1]).
 
 
 %% =============================================================================
@@ -75,16 +80,8 @@ cidr(_) ->
 -spec peername({inet:ip_address() | binary(), inet:port_number()}) ->
     {ok, {inet:ip_address(), inet:port_number()}} | boolean().
 
-peername({IP, Port})
-when is_tuple(IP) andalso Port >= 0 andalso Port =< 65535 ->
-    case inet:ntoa(IP) of
-        {error, einval} -> false;
-        _ -> true
-    end;
-
-peername({Bin, Port})
-when is_binary(Bin) andalso Port >= 0 andalso Port =< 65535 ->
-    case inet:parse_address(Bin) of
+peername({Term, Port}) when Port >= 0 andalso Port =< 65535 ->
+    case ip_address(Term) of
         {ok, IP} ->
             {ok, {IP, Port}};
         {error, _} ->
@@ -92,6 +89,31 @@ when is_binary(Bin) andalso Port >= 0 andalso Port =< 65535 ->
     end;
 
 peername(_) ->
+    false.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec ip_address({inet:ip_address() | binary(), inet:port_number()}) ->
+    {ok, {inet:ip_address(), inet:port_number()}} | boolean().
+
+ip_address(Term) when is_tuple(Term) ->
+    case inet:ntoa(Term) of
+        {error, einval} -> false;
+        _ -> true
+    end;
+
+ip_address(Term) when is_binary(Term) ->
+    case inet:parse_address(Term) of
+        {ok, _} = OK ->
+            OK;
+        {error, _} ->
+            false
+    end;
+
+ip_address(_) ->
     false.
 
 
@@ -363,6 +385,33 @@ authorized_key(_) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
+-spec permission(Term :: binary()) -> boolean().
+
+permission(Term) ->
+    % wamp_uri:is_valid(Term, strict).
+    lists:member(Term, ?WAMP_PERMISSIONS).
+
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec policy_resource(Term :: uri() | any) -> {ok, term()} | boolean().
+
+policy_resource(any) ->
+    {ok, any};
+policy_resource(<<"any">>) ->
+    {ok, any};
+policy_resource(Term) ->
+    %% We need to know the match strategy to validate the URI
+    is_binary(Term).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec existing_atom(Term :: binary() | atom()) -> {ok, term()} | boolean().
 
 existing_atom(Term) when is_binary(Term) ->
@@ -388,3 +437,99 @@ existing_atom(_) ->
 
 realm_uri(Term) ->
     wamp_uri:is_valid(Term, wamp_config:get(uri_strictness)).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec subprotocol(binary() | subprotocol()) ->
+    {ok, subprotocol()} | boolean().
+
+subprotocol(T) when is_binary(T) ->
+    try
+        subprotocol(bin_to_subprotocol(T))
+    catch
+        throw:invalid_subprotocol ->
+            false
+    end;
+
+subprotocol({ws, text, json} = S) ->
+    {ok, S};
+
+subprotocol({raw, binary, json} = S) ->
+    {ok, S};
+
+subprotocol({raw, binary, erl} = S) ->
+    {ok, S};
+
+subprotocol({T, binary, msgpack} = S) when T =:= ws orelse T =:= raw ->
+    {ok, S};
+
+subprotocol({T, binary, bert} = S) when T =:= ws orelse T =:= raw ->
+    {ok, S};
+
+subprotocol({ws, text, json_batched}) ->
+    %% unsupported
+    false;
+
+subprotocol({ws, binary, msgpack_batched}) ->
+    %% unsupported
+    false;
+
+subprotocol({ws, binary, bert_batched}) ->
+    %% unsupported
+    false;
+
+subprotocol({ws, binary, erl_batched}) ->
+    %% unsupported
+    false;
+
+subprotocol({http, text, _} = S) ->
+    {ok, S};
+
+subprotocol(_) ->
+    %% invalid
+    false.
+
+
+
+
+%% =============================================================================
+%% PRIVATE
+%% =============================================================================
+
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec bin_to_subprotocol(binary()) -> subprotocol() | no_return().
+
+bin_to_subprotocol(?WAMP2_JSON) ->
+    {ws, text, json};
+
+bin_to_subprotocol(?WAMP2_MSGPACK) ->
+    {ws, binary, msgpack};
+
+bin_to_subprotocol(?WAMP2_JSON_BATCHED) ->
+    {ws, text, json_batched};
+
+bin_to_subprotocol(?WAMP2_MSGPACK_BATCHED) ->
+    {ws, binary, msgpack_batched};
+
+bin_to_subprotocol(?WAMP2_BERT) ->
+    {ws, binary, bert};
+
+bin_to_subprotocol(?WAMP2_ERL) ->
+    {ws, binary, erl};
+
+bin_to_subprotocol(?WAMP2_BERT_BATCHED) ->
+    {ws, binary, bert_batched};
+
+bin_to_subprotocol(?WAMP2_ERL_BATCHED) ->
+    {ws, binary, erl_batched};
+
+bin_to_subprotocol(_) ->
+    throw(invalid_subprotocol).

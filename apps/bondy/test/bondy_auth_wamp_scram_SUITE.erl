@@ -124,6 +124,7 @@ missing_client_nonce(Config) ->
     Roles = [],
     Peer = {{127, 0, 0, 1}, 10000},
 
+    %% TODO Create session and replace the following call
     {ok, Ctxt1} = bondy_auth:init(SessionId, RealmUri, ?U1, Roles, Peer),
     ?assertEqual(
         true,
@@ -143,6 +144,7 @@ test_1(Config) ->
     Roles = [],
     Peer = {{127, 0, 0, 1}, 10000},
 
+    %% TODO Create session and replace the following call
     {ok, Ctxt1} = bondy_auth:init(SessionId, RealmUri, ?U1, Roles, Peer),
 
     User = bondy_rbac_user:lookup(RealmUri, ?U1),
@@ -194,6 +196,7 @@ test_1(Config) ->
     ),
 
     %% user 2 is not granted access from Peer (see test_2)
+    %% TODO Create session and replace the following call
     {ok, Ctxt2} = bondy_auth:init(SessionId, RealmUri, ?U2, Roles, Peer),
 
     ?assertEqual(
@@ -207,7 +210,7 @@ test_1(Config) ->
     ).
 
 
-client_signature(UserId, ClientNonce, ChallengeExtra) ->
+client_signature(Username, ClientNonce, ChallengeExtra) ->
     #{
         nonce := ServerNonce, %% base64
         salt := Salt,  %% base64
@@ -215,7 +218,7 @@ client_signature(UserId, ClientNonce, ChallengeExtra) ->
     } = ChallengeExtra,
 
     AuthMessage = bondy_password_scram:auth_message(
-        UserId, ClientNonce, ServerNonce, Salt, Iterations
+        Username, ClientNonce, ServerNonce, Salt, Iterations
     ),
 
     %% A hack to comply with bondy_password_scram API

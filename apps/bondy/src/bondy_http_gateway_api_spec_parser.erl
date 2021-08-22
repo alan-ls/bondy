@@ -1687,13 +1687,13 @@ content_types_provided(Bin) ->
 % @TODO Avoid doing this and require the user to setup the environment first!
 check_realm_exists(Uri) ->
     case bondy_realm:lookup(Uri) of
+        {ok, _} ->
+            ok;
         {error, not_found} ->
             Reason = {
                 badarg,  <<"There is no realm named ", $', Uri/binary, $'>>
             },
-            error(Reason);
-        _ ->
-            ok
+            error(Reason)
     end.
 
 

@@ -27,24 +27,27 @@
 %% @end
 %% -----------------------------------------------------------------------------
 -module(bondy_auth).
--include("bondy.hrl").
 -include_lib("wamp/include/wamp.hrl").
+-include("bondy.hrl").
 -include("bondy_security.hrl").
 
--type context()         ::  #{
-    session_id := id() | undefined,
-    realm_uri := uri(),
-    user_id := binary() | undefined,
-    role := binary(),
-    roles := [binary()],
-    provider => binary(),
-    method => binary(),
-    conn_ip := [{ip, inet:ip_address()}],
-    available_methods := [binary()],
-    callback_mod => module(),
-    callback_mod_state => term(),
-    user := bondy_rbac_user:t() | undefined
-}.
+-record(bondy_auth_context, {
+    id                  ::  binary(),
+    session_id          ::  id(),
+    realm_uri           ::  uri(),
+    anonymous           ::  boolean(),
+    role                ::  binary(),
+    roles               ::  [binary()],
+    ip_address          ::  inet:ip_address(),
+    available_methods   ::  [binary()],
+    provider            ::  maybe(binary()),
+    method              ::  maybe(binary()),
+    callback_mod        ::  maybe(module()),
+    callback_mod_state  ::  maybe(term()),
+    user                ::  maybe(bondy_rbac_user:t())
+}).
+
+-opaque context()       ::  #bondy_auth_context{}.
 
 %% TODO change to
 % #{
@@ -53,9 +56,9 @@
 %     channel_binding => required => boolean(), types => list()}
 % }.
 -type requirements()    ::  #{
-    identification := boolean,
-    password := {true, #{protocols := [cra | scram]}} | boolean(),
-    authorized_keys := boolean(),
+    identification      := boolean,
+    password            := {true, #{protocols := [cra | scram]}} | boolean(),
+    authorized_keys     := boolean()
     any => requirements(),
     all => requirements()
 }.
@@ -66,22 +69,24 @@
 
 -export([authenticate/3]).
 -export([authenticate/4]).
--export([method/1]).
--export([provider/1]).
--export([role/1]).
--export([roles/1]).
+-export([id/1]).
 -export([available_methods/1]).
 -export([available_methods/2]).
 -export([challenge/3]).
--export([conn_ip/1]).
--export([init/5]).
+-export([ip_address/1]).
+-export([new/3]).
+-export([is_anonymous/1]).
+-export([method/1]).
 -export([method_info/0]).
 -export([method_info/1]).
 -export([methods/0]).
--export([session_id/1]).
+-export([provider/1]).
 -export([realm_uri/1]).
--export([user_id/1]).
+-export([role/1]).
+-export([roles/1]).
+-export([session_id/1]).
 -export([user/1]).
+-export([username/1]).
 
 
 
@@ -127,45 +132,49 @@
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec init(
-    SessionId :: id(),
-    Realm :: bondy_realm:t() | uri(),
-    UserId :: binary() | anonymous,
+-spec new(
+    Authid :: binary() | anonymous,
     Roles :: all | binary() | [binary()] | undefined,
-    Peer :: {inet:ip_address(), inet:port_number()}) ->
+    Session :: bondy_session:t()) ->
     {ok, context()}
     | {error, {no_such_user, binary()} | no_such_realm | no_such_group}
     | no_return().
 
-init(SessionId, Uri, UserId, Roles, Peer) when is_binary(Uri) ->
-    case bondy_realm:lookup(string:casefold(Uri)) of
-        {error, not_found} ->
-            {error, no_such_realm};
-        Realm ->
-            init(SessionId, Realm, UserId, Roles, Peer)
-    end;
-
-init(SessionId, Realm, UserId0, Roles0, {IPAddress, _}) ->
+new(Authid0, Roles0, Session) ->
     try
-        RealmUri = bondy_realm:uri(Realm),
-        UserId = casefold(UserId0),
-        User = get_user(RealmUri, UserId),
+        RealmUri = bondy_session:realm_uri(Session),
+        Authid = casefold(Authid0),
+        IsAnonymous = anonymous == Authid,
+        User = get_user(RealmUri, Authid),
         {Role, Roles} = valid_roles(Roles0, User),
 
-        Ctxt = #{
-            session_id => SessionId,
-            realm_uri => RealmUri,
-            user_id => UserId,
-            user => User,
-            role => Role,
-            roles => Roles,
-            conn_ip => IPAddress
+        IPAddress = case bondy_session:real_ip_address(Session) of
+            undefined ->
+                bondy_session:ip_address(Session);
+            Val ->
+                Val
+        end,
+
+        %% We compute the available authentication methods for this user on the
+        %% requested realm when connected on the given network
+        Methods = compute_available_methods(RealmUri, Authid, User, IPAddress),
+
+        Ctxt = #bondy_auth_context{
+            id = maybe_gen_id(Authid),
+            anonymous = IsAnonymous,
+            session_id = bondy_session:id(Session),
+            realm_uri = RealmUri,
+            user = User,
+            role = Role,
+            roles = Roles,
+            ip_address = IPAddress,
+            available_methods = Methods
         },
-        Methods = compute_available_methods(Realm, Ctxt),
-        {ok, maps:put(available_methods, Methods, Ctxt)}
+
+        {ok, Ctxt}
 
     catch
-        throw:Reason ->
+        _:Reason ->
             {error, Reason}
     end.
 
@@ -206,7 +215,7 @@ method_info(Method) ->
 %% -----------------------------------------------------------------------------
 -spec session_id(context()) -> id().
 
-session_id(#{session_id := Value}) ->
+session_id(#bondy_auth_context{session_id = Value}) ->
     Value.
 
 
@@ -214,9 +223,29 @@ session_id(#{session_id := Value}) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec user_id(context()) -> binary() | undefined.
+-spec username(context()) -> binary() | undefined.
 
-user_id(#{user_id := Value}) ->
+username(Ctxt) ->
+    id(Ctxt).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec id(context()) -> binary() | undefined.
+
+id(#bondy_auth_context{id = Value}) ->
+    Value.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec is_anonymous(context()) -> boolean().
+
+is_anonymous(#bondy_auth_context{anonymous = Value}) ->
     Value.
 
 
@@ -226,7 +255,7 @@ user_id(#{user_id := Value}) ->
 %% -----------------------------------------------------------------------------
 -spec method(context()) -> [binary()].
 
-method(#{method := Value}) ->
+method(#bondy_auth_context{method = Value}) ->
     Value.
 
 
@@ -236,7 +265,7 @@ method(#{method := Value}) ->
 %% -----------------------------------------------------------------------------
 -spec available_methods(context()) -> [binary()].
 
-available_methods(#{available_methods := Value}) ->
+available_methods(#bondy_auth_context{available_methods = Value}) ->
     Value.
 
 
@@ -248,7 +277,7 @@ available_methods(#{available_methods := Value}) ->
 %% -----------------------------------------------------------------------------
 -spec available_methods(List :: [binary()], Ctxt :: context()) -> [binary()].
 
-available_methods(List, #{available_methods := Available}) ->
+available_methods(List, #bondy_auth_context{available_methods = Available}) ->
     sets:to_list(
         sets:intersection(sets:from_list(List), sets:from_list(Available))
     ).
@@ -260,7 +289,7 @@ available_methods(List, #{available_methods := Available}) ->
 %% -----------------------------------------------------------------------------
 -spec provider(context()) -> [binary()].
 
-provider(#{provider := Value}) ->
+provider(#bondy_auth_context{provider = Value}) ->
     Value.
 
 
@@ -270,7 +299,7 @@ provider(#{provider := Value}) ->
 %% -----------------------------------------------------------------------------
 -spec role(context()) -> binary().
 
-role(#{role := Value}) ->
+role(#bondy_auth_context{role = Value}) ->
     Value.
 
 
@@ -280,7 +309,7 @@ role(#{role := Value}) ->
 %% -----------------------------------------------------------------------------
 -spec roles(context()) -> [binary()].
 
-roles(#{roles := Value}) ->
+roles(#bondy_auth_context{roles = Value}) ->
     Value.
 
 
@@ -290,7 +319,7 @@ roles(#{roles := Value}) ->
 %% -----------------------------------------------------------------------------
 -spec user(context()) -> bondy_rbac_user:t() | undefined.
 
-user(#{user := Value}) ->
+user(#bondy_auth_context{user = Value}) ->
     Value;
 
 user(_) ->
@@ -303,7 +332,7 @@ user(_) ->
 %% -----------------------------------------------------------------------------
 -spec realm_uri(context()) -> uri().
 
-realm_uri(#{realm_uri := Value}) ->
+realm_uri(#bondy_auth_context{realm_uri = Value}) ->
     Value.
 
 
@@ -311,9 +340,9 @@ realm_uri(#{realm_uri := Value}) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec conn_ip(context()) -> [{ip, inet:ip_address()}].
+-spec ip_address(context()) -> [{ip, inet:ip_address()}].
 
-conn_ip(#{conn_ip := Value}) ->
+ip_address(#bondy_auth_context{ip_address = Value}) ->
     Value.
 
 
@@ -327,19 +356,19 @@ conn_ip(#{conn_ip := Value}) ->
     | {ok, NewCtxt :: context()}
     | {error, Reason :: any()}.
 
-challenge(Method, DataIn, #{method := Method} = Ctxt0) ->
-    #{
-        callback_mod := CBMod,
-        callback_mod_state := CBModState0
-    } = Ctxt0,
+challenge(Method, DataIn, #bondy_auth_context{method = Method} = Ctxt) ->
+    #bondy_auth_context{
+        callback_mod = CBMod,
+        callback_mod_state = CBState
+    } = Ctxt,
 
-    try CBMod:challenge(DataIn, Ctxt0, CBModState0) of
-        {ok, CBModState1} ->
-            Ctxt = maps:put(callback_mod_state, CBModState1, Ctxt0),
-            {ok, Ctxt};
-        {ok, ChallengeData, CBModState1} ->
-            Ctxt = maps:put(callback_mod_state, CBModState1, Ctxt0),
-            {ok, ChallengeData, Ctxt};
+    try CBMod:challenge(DataIn, Ctxt, CBState) of
+        {ok, NewCBState} ->
+            NewCtxt = Ctxt#bondy_auth_context{callback_mod_state = NewCBState},
+            {ok, NewCtxt};
+        {ok, ChallengeData, NewCBState} ->
+            NewCtxt = Ctxt#bondy_auth_context{callback_mod_state = NewCBState},
+            {ok, ChallengeData, NewCtxt};
         {error, Reason, _} ->
             {error, Reason}
     catch
@@ -347,7 +376,7 @@ challenge(Method, DataIn, #{method := Method} = Ctxt0) ->
             {error, EReason}
     end;
 
-challenge(_, _, #{method := _}) ->
+challenge(_, _, #bondy_auth_context{method = _}) ->
     %% This might happen when you init and call challenge twice with a
     %% different Method. The first call sets the context 'method',
     %% the second call in principle should never happen. We allow IFF the value
@@ -379,7 +408,7 @@ challenge(Method, DataIn, Ctxt0) ->
     {ok, ReturnExtra :: map(), NewCtxt :: context()}
     | {error, Reason :: any()}.
 
-authenticate(Signature, DataIn, #{method := Method} = Ctxt) ->
+authenticate(Signature, DataIn, #bondy_auth_context{method = Method} = Ctxt) ->
     authenticate(Method, Signature, DataIn, Ctxt).
 
 
@@ -396,16 +425,20 @@ authenticate(Signature, DataIn, #{method := Method} = Ctxt) ->
     {ok, ReturnExtra :: map(), NewCtxt :: context()}
     | {error, Reason :: any()}.
 
-authenticate(Method, Signature, DataIn, #{method := Method} = Ctxt) ->
+authenticate(
+    Method, Signature, DataIn, #bondy_auth_context{method = Method} = Ctxt) ->
     try
-        #{
-            callback_mod := CBMod,
-            callback_mod_state := CBModState0
+        #bondy_auth_context{
+            callback_mod = CBMod,
+            callback_mod_state = CBState
         } = Ctxt,
 
-        case CBMod:authenticate(Signature, DataIn, Ctxt, CBModState0) of
-            {ok, DataOut, CBModState1} ->
-                {ok, DataOut, maps:put(callback_mod_state, CBModState1, Ctxt)};
+        case CBMod:authenticate(Signature, DataIn, Ctxt, CBState) of
+            {ok, DataOut, NewCBState} ->
+                NewCtxt = Ctxt#bondy_auth_context{
+                    callback_mod_state = NewCBState
+                },
+                {ok, DataOut, NewCtxt};
             {error, Reason, _} ->
                 {error, Reason}
         end
@@ -414,7 +447,7 @@ authenticate(Method, Signature, DataIn, #{method := Method} = Ctxt) ->
             {error, EReason}
     end;
 
-authenticate(_, _, _, #{method := _}) ->
+authenticate(_, _, _, #bondy_auth_context{method = _}) ->
     %% This might happen when you init and call challenge and authenticate with
     %% different Method values (or called authenticate twice).
     {error, invalid_method};
@@ -439,6 +472,21 @@ authenticate(Method, Signature, DataIn, Ctxt) ->
 
 
 
+%% @private
+casefold(anonymous) ->
+    anonymous;
+
+casefold(Bin) when is_binary(Bin) ->
+    string:casefold(Bin).
+
+
+%% @private
+maybe_gen_id(anonymous) ->
+    bondy_utils:uuid();
+
+maybe_gen_id(Authid) ->
+    Authid.
+
 
 %% -----------------------------------------------------------------------------
 %% @doc Returns the requested role `Role' if user `User' is a member of that
@@ -462,7 +510,7 @@ valid_roles([], _) ->
 valid_roles(undefined, User) ->
     valid_roles(all, User);
 
-valid_roles(_, #{username := anonymous}) ->
+valid_roles(_, #{id := anonymous}) ->
     %% If anonymous (user) the only valid role (group) is anonymous
     %% so we drop the requested ones.
     {anonymous, [anonymous]};
@@ -497,14 +545,6 @@ valid_roles(Roles, User) ->
 
 
 %% @private
-casefold(anonymous) ->
-    anonymous;
-
-casefold(Bin) when is_binary(Bin) ->
-    string:casefold(Bin).
-
-
-%% @private
 callback_mod(Method) ->
     callback_mod(Method, fun(X) -> X end).
 
@@ -512,29 +552,24 @@ callback_mod(Method, Fun) when is_function(Fun, 1) ->
     case maps:get(Method, ?BONDY_AUTHMETHODS_INFO, undefined) of
         undefined ->
             throw(invalid_method);
-        #{callback_mod := undefined} ->
+        #bondy_auth_context{callback_mod = undefined} ->
             throw(unsupported_method);
-        #{callback_mod := Mod} ->
+        #bondy_auth_context{callback_mod = Mod} ->
             Fun(Mod)
     end.
 
 
 %% @private
-compute_available_methods(Realm, Ctxt) ->
-    #{
-        realm_uri := RealmUri,
-        user_id := UserId,
-        conn_ip := IPAddress
-    } = Ctxt,
-
+compute_available_methods(RealmUri, Authid, User, IPAddress) ->
     %% The allowed methods for the Realm
+    Realm = bondy_realm:fetch(RealmUri),
     RealmAllowed = bondy_realm:authmethods(Realm),
     R1 = leap_relation:relation({{var, method}}, [{X} || X <- RealmAllowed]),
 
     %% The allowed methods for this AuthID when connecting from IPAddress,
     %% we keep the order as the sources are already sorted from most specific
     %% to most general
-    Sources = bondy_rbac_source:match(RealmUri, UserId, IPAddress),
+    Sources = bondy_rbac_source:match(RealmUri, Authid, IPAddress),
     {_, UserAllowed} = lists:foldl(
         fun(Source, {N, Acc}) ->
             {N + 1, [{N, bondy_rbac_source:authmethod(Source)} | Acc]}
@@ -557,9 +592,9 @@ compute_available_methods(Realm, Ctxt) ->
     Filter = fun
         ({_, ?WAMP_ANON_AUTH = Method}) ->
             true =:= bondy_config:get([security, allow_anonymous_user], true)
-                andalso matches_requirements(Method, Ctxt);
+                andalso matches_requirements(Method, Authid, User);
         ({_Order, Method}) ->
-            matches_requirements(Method, Ctxt)
+            matches_requirements(Method, Authid, User)
     end,
 
     Available = lists:usort(lists:filtermap(Filter, Allowed)),
@@ -570,7 +605,7 @@ compute_available_methods(Realm, Ctxt) ->
 
 
 %% @private
-matches_requirements(Method, #{user_id := UserId, user := User}) ->
+matches_requirements(Method, Authid, User) ->
     Password = bondy_rbac_user:password(User),
 
     Requirements = maps:to_list((callback_mod(Method)):requirements()),
@@ -580,11 +615,11 @@ matches_requirements(Method, #{user_id := UserId, user := User}) ->
             Match({identification, false}) ->
                 %% The special case. If the client provided an auth_id /=
                 %% anonymous then the anonymous method is not allowed.
-                UserId == anonymous;
+                Authid == anonymous;
             Match({_, false}) ->
                 true;
             Match({identification, true}) ->
-                UserId =/= anonymous;
+                Authid =/= anonymous;
             Match({authorized_keys, true}) ->
                 bondy_rbac_user:has_authorized_keys(User);
             Match({password, true}) ->
@@ -605,8 +640,8 @@ matches_requirements(Method, #{user_id := UserId, user := User}) ->
 get_user(_, undefined) ->
     undefined;
 
-get_user(RealmUri, UserId) ->
-    case bondy_rbac_user:lookup(RealmUri, UserId) of
+get_user(RealmUri, Authid) ->
+    case bondy_rbac_user:lookup(RealmUri, Authid) of
         {error, not_found} ->
             throw({no_such_user, UserId});
         User ->
@@ -621,10 +656,10 @@ get_user(RealmUri, UserId) ->
 
 
 %% @private
-maybe_set_method(Method, #{method := Method} = Ctxt) ->
+maybe_set_method(Method, #bondy_auth_context{method = Method} = Ctxt) ->
     Ctxt;
 
-maybe_set_method(_, #{method := _}) ->
+maybe_set_method(_, #bondy_auth_context{method = _}) ->
     %% Method was already set and does not match the one requested
     throw(invalid_method);
 
@@ -640,34 +675,12 @@ maybe_set_method(Method, Ctxt) ->
 
     case Mod:init(Ctxt) of
         {ok, CBState} ->
-            Ctxt#{
-                provider => ?BONDY_AUTH_PROVIDER,
-                method => Method,
-                callback_mod => Mod,
-                callback_mod_state => CBState
+            Ctxt#bondy_auth_context{
+                provider = ?BONDY_AUTH_PROVIDER,
+                method = Method,
+                callback_mod = Mod,
+                callback_mod_state = CBState
             };
         {error, Reason} ->
             throw(Reason)
     end.
-
-
-%% TODO
-% maybe_upgrade_password(PW0, M) ->
-%     String = maps:get(password, M),
-%     case bondy_password:upgrade(String, PW0) of
-%         false ->
-%             PW0;
-%         {true, PW1} ->
-%             %% The password was upgraded, we store it
-%             RealmUri = maps:get(realm_uri, M),
-%             Name = maps:get(username, M),
-
-%             case bondy_rbac_user:update(RealmUri, Name, #{password => PW1}) of
-%                 {ok, _} ->
-%                     _ = lager:debug("Password upgraded"),
-%                     PW1;
-%                 {error, Reason} ->
-%                     _ = lager:debug("Error while trying to upgrade password"),
-%                     throw(Reason)
-%             end
-%     end.

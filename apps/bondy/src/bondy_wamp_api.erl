@@ -55,20 +55,18 @@
 -spec handle_call(M :: wamp_message:call(), Ctxt :: bony_context:t()) -> ok.
 
 handle_call(#call{procedure_uri = Proc} = M, Ctxt) ->
-    PeerId = bondy_context:peer_id(Ctxt),
-
     try
         Reply = handle(resolve(Proc), M, Ctxt),
-        bondy:send(PeerId, Reply)
+        bondy_context:reply(Reply, Ctxt)
     catch
         throw:no_such_procedure ->
             Error = bondy_wamp_utils:no_such_procedure_error(M),
-            bondy:send(PeerId, Error);
+            bondy_context:reply(Error, Ctxt);
         _:Reason ->
             %% We catch any exception from handle/3 and turn it
             %% into a WAMP Error
             Error = bondy_wamp_utils:maybe_error({error, Reason}, M),
-            bondy:send(PeerId, Error)
+            bondy_context:reply(Error, Ctxt)
     end.
 
 

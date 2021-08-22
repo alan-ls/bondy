@@ -103,7 +103,7 @@
 
 
 %% API
--export([close_context/1]).
+-export([on_session_close/1]).
 -export([forward/2]).
 -export([handle_peer_message/1]).
 -export([roles/0]).
@@ -130,10 +130,10 @@ shutdown() ->
         #{message => <<"Router is shutting down">>},
         ?WAMP_SYSTEM_SHUTDOWN
     ),
-    Fun = fun(PeerId) -> catch bondy:send(PeerId, M) end,
+    Fun = fun(PeerInfo) -> catch bondy:send(PeerInfo, M) end,
 
     try
-        _ = bondy_utils:foreach(Fun, bondy_session:list_peer_ids(100))
+        _ = bondy_utils:foreach(Fun, bondy_session:list_peer_infos(100))
     catch
        _:Reason ->
             _ = lager:error(
@@ -147,10 +147,12 @@ shutdown() ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec close_context(bondy_context:t()) -> bondy_context:t().
+-spec on_session_close(bondy_context:t()) -> ok.
 
-close_context(Ctxt) ->
-    bondy_dealer:close_context(bondy_broker:close_context(Ctxt)).
+on_session_close(Ctxt) ->
+    ok = bondy_broker:on_session_close(Ctxt),
+    ok = bondy_dealer:on_session_close(Ctxt),
+    ok.
 
 
 %% -----------------------------------------------------------------------------
@@ -184,21 +186,16 @@ agent() ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec forward(M :: wamp_message(), Ctxt :: bondy_context:t()) ->
-    {ok, bondy_context:t()}
-    | {reply, Reply :: wamp_message(), bondy_context:t()}
-    | {stop, Reply :: wamp_message(), bondy_context:t()}.
+    ok
+    | {reply, Reply :: wamp_message()}
+    | {stop, Reply :: wamp_message()}.
 
 
-forward(M, #{session := _} = Ctxt0) ->
-    Ctxt1 = bondy_context:set_request_timestamp(Ctxt0, erlang:monotonic_time()),
-    %% _ = lager:debug(
-    %%     "Forwarding message; peer_id=~p, message=~p",
-    %%     [bondy_context:peer_id(Ctxt), M]
-    %% ),
+forward(M, #{session := Session} = Ctxt) ->
     %% Client has a session so this should be either a message
     %% for broker or dealer roles
-    ok = bondy_event_manager:notify({wamp, M, Ctxt1}),
-    do_forward(M, Ctxt1).
+    ok = bondy_event_manager:notify({wamp, M, Session}),
+    do_forward(M, Ctxt).
 
 
 %% -----------------------------------------------------------------------------
@@ -211,35 +208,39 @@ handle_peer_message(PM) ->
     bondy_peer_message:is_message(PM) orelse exit(badarg),
 
     Payload = bondy_peer_message:payload(PM),
-    PeerId = bondy_peer_message:to(PM),
+    PeerInfo = bondy_peer_message:to(PM),
     From = bondy_peer_message:from(PM),
     Opts = bondy_peer_message:options(PM),
 
-    handle_peer_message(Payload, PeerId, From, Opts).
+    handle_peer_message(Payload, PeerInfo, From, Opts).
 
 
--spec handle_peer_message(wamp_message(), peer_id(), remote_peer_id(), map()) ->
+-spec handle_peer_message(
+    Msg :: wamp_message(),
+    To :: bondy_session:t(),
+    From :: bondy_session:t(),
+    Opts :: map()) ->
     ok | no_return().
 
-handle_peer_message(#publish{} = M, PeerId, From, Opts) ->
-    bondy_broker:handle_peer_message(M, PeerId, From, Opts);
+handle_peer_message(#publish{} = M, To, From, Opts) ->
+    bondy_broker:handle_peer_message(M, To, From, Opts);
 
-handle_peer_message(#error{} = M, PeerId, From, Opts) ->
+handle_peer_message(#error{} = M, To, From, Opts) ->
     %% This is a CALL, INVOCATION or INTERRUPT error
     %% see bondy_peer_message for more details
-    bondy_dealer:handle_peer_message(M, PeerId, From, Opts);
+    bondy_dealer:handle_peer_message(M, To, From, Opts);
 
-handle_peer_message(#interrupt{} = M, PeerId, From, Opts) ->
-    bondy_dealer:handle_peer_message(M, PeerId, From, Opts);
+handle_peer_message(#interrupt{} = M, To, From, Opts) ->
+    bondy_dealer:handle_peer_message(M, To, From, Opts);
 
-handle_peer_message(#call{} = M, PeerId, From, Opts) ->
-    bondy_dealer:handle_peer_message(M, PeerId, From, Opts);
+handle_peer_message(#call{} = M, To, From, Opts) ->
+    bondy_dealer:handle_peer_message(M, To, From, Opts);
 
-handle_peer_message(#invocation{} = M, PeerId, From, Opts) ->
-    bondy_dealer:handle_peer_message(M, PeerId, From, Opts);
+handle_peer_message(#invocation{} = M, To, From, Opts) ->
+    bondy_dealer:handle_peer_message(M, To, From, Opts);
 
-handle_peer_message(#yield{} = M, PeerId, From, Opts) ->
-    bondy_dealer:handle_peer_message(M, PeerId, From, Opts).
+handle_peer_message(#yield{} = M, To, From, Opts) ->
+    bondy_dealer:handle_peer_message(M, To, From, Opts).
 
 
 
@@ -286,7 +287,7 @@ do_forward(#register{} = M, Ctxt) ->
     %% At the moment this relies on Erlang's guaranteed causal delivery of
     %% messages between two processes even when in different nodes.
     ok = sync_forward({M, Ctxt}),
-    {ok, Ctxt};
+    ok;
 
 do_forward(#call{procedure_uri = <<"wamp.", _/binary>>} = M, Ctxt) ->
     async_forward(M, Ctxt);
@@ -310,7 +311,7 @@ do_forward(#call{} = M, Ctxt0) ->
     ok = sync_forward({M, Ctxt0}),
     %% The invocation is always async and the result or error will be delivered
     %% asynchronously by the dealer.
-    {ok, Ctxt0};
+    ok;
 
 do_forward(M, Ctxt) ->
     async_forward(M, Ctxt).
@@ -330,7 +331,7 @@ async_forward(M, Ctxt0) ->
     Event = {M, Ctxt0},
     try bondy_router_worker:cast(fun() -> sync_forward(Event) end) of
         ok ->
-            {ok, Ctxt0};
+            ok;
         {error, overload} ->
             _ = lager:info(
                 "Router pool overloaded, will route message synchronously; "
@@ -339,8 +340,7 @@ async_forward(M, Ctxt0) ->
             %% @TODO publish metaevent and stats
             %% @TODO use throttling and send error to caller conditionally
             %% We do it synchronously i.e. blocking the caller
-            ok = sync_forward(Event),
-            {ok, Ctxt0}
+            sync_forward(Event)
     catch
         error:Reason when Acknowledge == true ->
             %% TODO Maybe publish metaevent
@@ -354,7 +354,7 @@ async_forward(M, Ctxt0) ->
                 #{error => ErrorMap}
             ),
             ok = bondy_event_manager:notify({wamp, Reply, Ctxt0}),
-            {reply, Reply, Ctxt0};
+            {reply, Reply};
         Class:Reason:Stacktrace ->
             Ctxt = bondy_context:realm_uri(Ctxt0),
             SessionId = bondy_context:session_id(Ctxt0),
@@ -364,7 +364,7 @@ async_forward(M, Ctxt0) ->
                 [Class, Reason, M, Ctxt, SessionId, Stacktrace]
             ),
             %% TODO Maybe publish metaevent and stats
-            {ok, Ctxt0}
+            ok
     end.
 
 

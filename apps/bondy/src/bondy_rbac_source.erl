@@ -299,9 +299,9 @@ match(RealmUri, Username) ->
 -spec match(
     RealmUri :: uri(),
     Username :: binary() | all | anonymous,
-    ConnIP :: inet:ip_address()) -> [t()].
+    IPAddress :: inet:ip_address()) -> [t()].
 
-match(RealmUri, Username, ConnIP) ->
+match(RealmUri, Username, IPAddress) ->
     %% We need to use the internal match function (do_match) as it returns Keys
     %% and Values, we need the keys to be able to sort
 
@@ -326,9 +326,9 @@ match(RealmUri, Username, ConnIP) ->
 -spec match_first(
     RealmUri :: uri(),
     Username :: binary() | all | anonymous,
-    ConnIP :: inet:ip_address()) -> {ok, t()} | {error, nomatch}.
+    IPAddress :: inet:ip_address()) -> {ok, t()} | {error, nomatch}.
 
-match_first(RealmUri, Username, ConnIP) ->
+match_first(RealmUri, Username, IPAddress) ->
     %% We need to use the internal match function (do_match) as it returns Keys
     %% and Values, we need the keys to be able to sort
     Sources = sort_sources(do_match(RealmUri, Username)),

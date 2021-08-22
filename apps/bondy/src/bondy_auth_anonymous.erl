@@ -29,10 +29,10 @@
 -include("bondy_security.hrl").
 
 -type state() :: #{
-    user_id := binary() | undefined,
+    id := binary() | undefined,
     role := binary(),
     roles := [binary()],
-    conn_ip := [{ip, inet:ip_address()}]
+    ip_address := inet:ip_address()
 }.
 
 %% BONDY_AUTH CALLBACKS
@@ -59,17 +59,8 @@
 
 init(Ctxt) ->
     try
-        UserId = bondy_auth:user_id(Ctxt),
-        anonymous =:= UserId orelse throw(invalid_context),
-
-        State = #{
-            user_id => UserId,
-            role => bondy_auth:role(Ctxt),
-            roles => bondy_auth:roles(Ctxt),
-            conn_ip => bondy_auth:conn_ip(Ctxt)
-        },
-        {ok, State}
-
+        bondy_auth:is_anonymous(Ctxt) orelse throw(invalid_context),
+        {ok, state(Ctxt)}
     catch
         throw:Reason ->
             {error, Reason}
@@ -119,14 +110,7 @@ challenge(_, _, State) ->
 
 authenticate(_, _, Ctxt, State) ->
     %% We validate the ctxt has not changed between init and authenticate calls
-    Data = #{
-        conn_ip => bondy_auth:conn_ip(Ctxt),
-        role => bondy_auth:role(Ctxt),
-        roles => bondy_auth:roles(Ctxt),
-        user_id => bondy_auth:user_id(Ctxt)
-    },
-
-    case Data == State of
+    case State == state(Ctxt) of
         true ->
             {ok, #{}, State};
         false ->
@@ -134,6 +118,21 @@ authenticate(_, _, Ctxt, State) ->
     end.
 
 
+
+%% =============================================================================
+%% PRIVATE
+%% =============================================================================
+
+
+
+%% @private
+state(Ctxt) ->
+    #{
+        id => bondy_auth:id(Ctxt),
+        ip_address => bondy_auth:ip_address(Ctxt),
+        role => bondy_auth:role(Ctxt),
+        roles => bondy_auth:roles(Ctxt)
+    }.
 
 
 

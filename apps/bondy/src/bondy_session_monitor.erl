@@ -1,4 +1,4 @@
--module(bondy_session_manager).
+-module(bondy_session_monitor).
 -behaviour(gen_server).
 -include("bondy.hrl").
 -include_lib("wamp/include/wamp.hrl").
@@ -7,8 +7,8 @@
 
 %% API
 -export([start_link/0]).
--export([open/4]).
--export([close/1]).
+-export([monitor/1]).
+-export([demonitor/1]).
 
 
 %% GEN_SERVER CALLBACKS
@@ -47,15 +47,9 @@ start_link() ->
 %% the connection crashes it performs the cleanup of any session data that
 %% should not be retained.
 %% -----------------------------------------------------------------------------
--spec open(
-    bondy_session:id(),
-    bondy_session:peer(),
-    uri() | bondy_realm:t(),
-    bondy_session:session_opts()) ->
-    bondy_session:t() | no_return().
+-spec monitor(bondy_session:t()) -> ok | no_return().
 
-open(Id, Peer, RealmOrUri, Opts) ->
-    Session = bondy_session:open(Id, Peer, RealmOrUri, Opts),
+monitor(Session) ->
     case gen_server:call(?MODULE, {monitor, Session}, 5000) of
         ok ->
             Session;
@@ -68,11 +62,9 @@ open(Id, Peer, RealmOrUri, Opts) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec close(bondy_session:t()) -> ok.
+-spec demonitor(bondy_session:t()) -> ok.
 
-close(Session) ->
-
-    ok = bondy_session:close(Session),
+demonitor(Session) ->
     gen_server:cast(?MODULE, {demonitor, Session}).
 
 
@@ -90,7 +82,12 @@ init([]) ->
 handle_call({monitor, Session}, _From, State) ->
     Id = bondy_session:id(Session),
     Uri = bondy_session:realm_uri(Session),
-    ok = gproc_monitor:subscribe({n, l, {session, Uri, Id}}),
+    Key = {session, Uri, Id},
+    Pid = bondy_session:pid(Session),
+
+    true = gproc:reg_other({n, l, Key}, Pid),
+    ok = gproc_monitor:subscribe({n, l, Key}),
+
     {reply, ok, State};
 
 handle_call(Event, From, State) ->
@@ -98,6 +95,7 @@ handle_call(Event, From, State) ->
         "Error handling call, reason=unsupported_event, event=~p, from=~p", [Event, From]
     ),
     {reply, {error, {unsupported_call, Event}}, State}.
+
 
 handle_cast({demonitor, Session}, State) ->
     Id = bondy_session:id(Session),
@@ -124,10 +122,10 @@ handle_info({gproc_monitor, {n, l, {session, Uri, Id}}, undefined}, State) ->
         [Uri, Id]
     ),
     case bondy_session:lookup(Id) of
+        {ok, Session} ->
+            cleanup(Session);
         {error, not_found} ->
-            ok;
-        Session ->
-            cleanup(Session)
+            ok
     end,
     {noreply, State};
 
@@ -157,17 +155,6 @@ code_change(_OldVsn, State, _Extra) ->
 %% =============================================================================
 
 
-
+%% TODO we should close the session not the ctxt?
 cleanup(Session) ->
-    %% TODO We need a new API to be the underlying cleanup function behind
-    %% bondy_context:close/1. In the meantime we create a fakce context,
-    %% knowing what it should contain for the close/2 call to work.
-    FakeCtxt = #{
-        id => bondy_session:id(Session),
-        realm_uri => bondy_session:realm_uri(Session),
-        node => bondy_session:node(Session),
-        peer_id => bondy_session:peer_id(Session),
-        session => Session
-    },
-    %% We close the session too
-    bondy_context:close(FakeCtxt, crash).
+    bondy_session:terminate(Session).

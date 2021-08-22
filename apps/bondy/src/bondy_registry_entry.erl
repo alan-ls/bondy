@@ -28,11 +28,11 @@
 %% Entries are immutable.
 -record(entry, {
     key                     ::  entry_key(),
-    pid                     ::  pid(),
     uri                     ::  uri() | atom(),
     match_policy            ::  binary(),
-    created                 ::  pos_integer() | atom(),
-    options                 ::  map() | atom()
+    pid                     ::  pid(),
+    options                 ::  map() | atom(),
+    created                 ::  integer()
 }).
 
 -record(entry_key, {
@@ -48,11 +48,11 @@
 -type entry_key()           ::  #entry_key{}.
 -type entry_type()          ::  registration | subscription.
 -type details_map()         ::  #{
-    id => id(),
-    created => calendar:date(),
-    uri => uri(),
-    match => binary()
-}.
+                                    id => id(),
+                                    created => calendar:date(),
+                                    uri => uri(),
+                                    match => binary()
+                                }.
 
 -export_type([t/0]).
 -export_type([entry_type/0]).
@@ -62,6 +62,7 @@
 -export([get_option/3]).
 -export([id/1]).
 -export([is_entry/1]).
+-export([is_local/1]).
 -export([key/1]).
 -export([key_pattern/3]).
 -export([key_pattern/5]).
@@ -69,11 +70,10 @@
 -export([new/4]).
 -export([new/5]).
 -export([node/1]).
--export([is_local/1]).
 -export([options/1]).
 -export([pattern/4]).
 -export([pattern/6]).
--export([peer_id/1]).
+-export([peer_ref/1]).
 -export([pid/1]).
 -export([realm_uri/1]).
 -export([session_id/1]).
@@ -92,35 +92,31 @@
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec new(entry_type(), peer_id(), uri(), map()) -> t().
+-spec new(entry_type(), bondy_session:t(), uri(), map()) -> t().
 
-new(Type, {RealmUri, Node, SessionId, Pid}, Uri, Options) ->
+new(Type, PeerRef, Uri, Options) ->
     RegId = bondy_utils:get_id(global),
-    new(Type, RegId, {RealmUri, Node, SessionId, Pid}, Uri, Options).
+    new(Type, RegId, PeerRef, Uri, Options).
 
 
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec new(entry_type(), id(), peer_id(), uri(), map()) -> t().
+-spec new(entry_type(), id(), bondy_session:ref(), uri(), map()) -> t().
 
-new(Type, RegId, {RealmUri, Node, SessionId, Pid}, Uri, Options) ->
+new(Type, RegId, PeerRef, Uri, Options) ->
     MatchPolicy = validate_match_policy(Options),
-    Key = #entry_key{
-        realm_uri = RealmUri,
-        node = Node,
-        session_id = SessionId,
-        entry_id = RegId,
-        type = Type
-    },
+
+    Key = entry_key(Type, RegId, PeerRef),
+
     #entry{
         key = Key,
-        pid = Pid,
         uri = Uri,
+        pid = bondy_session:pid(PeerRef),
         match_policy = MatchPolicy,
-        created = erlang:system_time(seconds),
-        options = parse_options(Type, Options)
+        options = parse_options(Type, Options),
+        created = erlang:system_time(second)
     }.
 
 
@@ -134,11 +130,11 @@ pattern(Type, RealmUri, EntryId, Options) ->
     MatchPolicy = validate_match_policy(pattern, Options),
     #entry{
         key = key_pattern(Type, RealmUri, '_', '_', EntryId),
-        pid = '_',
         uri = '_',
+        pid = '_',
         match_policy = MatchPolicy,
-        created = '_',
-        options = '_'
+        options = '_',
+        created = '_'
     }.
 
 %% -----------------------------------------------------------------------------
@@ -151,11 +147,11 @@ pattern(Type, RealmUri, Node, SessionId, Uri, Options) ->
     MatchPolicy = validate_match_policy(pattern, Options),
     #entry{
         key = key_pattern(Type, RealmUri, Node, SessionId, '_'),
-        pid = '_',
         uri = Uri,
+        pid = '_',
         match_policy = MatchPolicy,
-        created = '_',
-        options = '_'
+        options = '_',
+        created = '_'
     }.
 
 
@@ -192,6 +188,8 @@ andalso (is_integer(EntryId) orelse EntryId == '_') ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
+-spec is_entry(any()) -> boolean().
+
 is_entry(#entry{}) -> true;
 is_entry(_) -> false.
 
@@ -202,16 +200,18 @@ is_entry(_) -> false.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec key(t()) -> uri().
+
 key(#entry{key = Key}) ->
     Key.
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
-%% Returns the value of the subscription's or registration's realm_uri property.
+%% @doc Returns the value of the subscription's or registration's realm_uri
+%% property.
 %% @end
 %% -----------------------------------------------------------------------------
--spec realm_uri(t() | entry_key()) -> uri() | undefined.
+-spec realm_uri(t() | entry_key()) -> maybe(uri()).
+
 realm_uri(#entry{key = Key}) ->
     Key#entry_key.realm_uri;
 
@@ -226,6 +226,7 @@ realm_uri(#entry_key{} = Key) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec node(t() | entry_key()) -> atom().
+
 node(#entry{key = Key}) ->
     Key#entry_key.node;
 
@@ -238,6 +239,7 @@ node(#entry_key{} = Key) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec is_local(t() | entry_key()) -> boolean().
+
 is_local(#entry{key = Key}) ->
     is_local(Key);
 
@@ -251,17 +253,19 @@ is_local(#entry_key{} = Key) ->
 %% property.
 %% @end
 %% -----------------------------------------------------------------------------
--spec pid(t() | entry_key()) -> pid().
-pid(#entry{pid = Val}) -> Val.
+-spec pid(t()) -> maybe(pid()).
+
+pid(#entry{pid = Val}) ->
+    Val.
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
-%% Returns the value of the subscription's or registration's session_id
+%% @doc Returns the value of the subscription's or registration's session_id
 %% property.
 %% @end
 %% -----------------------------------------------------------------------------
--spec session_id(t() | entry_key()) -> id() | undefined.
+-spec session_id(t() | entry_key()) -> maybe(id()).
+
 session_id(#entry{key = Key}) ->
     Key#entry_key.session_id;
 
@@ -270,18 +274,18 @@ session_id(#entry_key{} = Key) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
-%% Returns the peer_id() of the subscription or registration
+%% @doc Returns a bondy_session:t() from the entry components.
 %% @end
 %% -----------------------------------------------------------------------------
--spec peer_id(t() | entry_key()) -> peer_id().
-peer_id(#entry{key = Key} = Entry) ->
-    {
+-spec peer_ref(t()) -> bondy_session:t().
+
+peer_ref(#entry{key = Key} = E) ->
+    bondy_session:new(
         Key#entry_key.realm_uri,
         Key#entry_key.node,
         Key#entry_key.session_id,
-        Entry#entry.pid
-    }.
+        E#entry.pid
+    ).
 
 
 %% -----------------------------------------------------------------------------
@@ -291,6 +295,7 @@ peer_id(#entry{key = Key} = Entry) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec id(t() | entry_key()) -> id() | '_'.
+
 id(#entry{key = Key}) ->
     Key#entry_key.entry_id;
 
@@ -304,6 +309,7 @@ id(#entry_key{} = Key) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec type(t() | entry_key()) -> entry_type().
+
 type(#entry{key = Key}) ->
     Key#entry_key.type;
 
@@ -318,6 +324,7 @@ type(#entry_key{} = Key) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec uri(t()) -> uri().
+
 uri(#entry{uri = Val}) -> Val.
 
 
@@ -327,6 +334,7 @@ uri(#entry{uri = Val}) -> Val.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec match_policy(t()) -> binary().
+
 match_policy(#entry{match_policy = Val}) -> Val.
 
 
@@ -347,6 +355,7 @@ created(#entry{created = Val}) -> Val.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec options(t()) -> map().
+
 options(#entry{options = Val}) -> Val.
 
 
@@ -355,6 +364,7 @@ options(#entry{options = Val}) -> Val.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec get_option(t(), any(), any()) -> any().
+
 get_option(#entry{options = Opts}, Key, Default) ->
     maps:get(Key, Opts, Default).
 
@@ -398,7 +408,7 @@ to_map(#entry{key = Key} = E) ->
         node => Key#entry_key.node,
         created => created_format(E#entry.created),
         uri => E#entry.uri,
-        pid => list_to_binary(pid_to_list(E#entry.pid)),
+        pid => list_to_binary(pid_to_list(pid(E))),
         match => E#entry.match_policy,
         options => E#entry.options
     }.
@@ -409,6 +419,23 @@ to_map(#entry{key = Key} = E) ->
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
+
+
+
+%% @private
+entry_key(Type, RegId, PeerRef) ->
+    RealmUri = bondy_session:realm_uri(PeerRef),
+    Node = bondy_session:node(PeerRef),
+    SessionId = bondy_session:id(PeerRef),
+
+    #entry_key{
+        realm_uri = RealmUri,
+        node = Node,
+        session_id = SessionId,
+        entry_id = RegId,
+        type = Type
+    }.
+
 
 validate_match_policy(Options) ->
     validate_match_policy(key, Options).

@@ -262,11 +262,17 @@ do_authenticate(ClientProof, Ctxt, State) ->
         }
     } = Password,
 
-    AuthId = bondy_auth:user_id(Ctxt),
+    Username = bondy_auth:username(Ctxt),
     CBindData = undefined, % We do not support channel binding yet
 
     AuthMessage = bondy_password_scram:auth_message(
-        AuthId, ClientNonce, ServerNonce, Salt, Iterations, CBindType, CBindData
+        Username,
+        ClientNonce,
+        ServerNonce,
+        Salt,
+        Iterations,
+        CBindType,
+        CBindData
     ),
     ClientSignature = bondy_password_scram:client_signature(
         ServerKey, AuthMessage

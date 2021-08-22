@@ -112,6 +112,7 @@
 
 -export_type([t/0]).
 -export_type([external/0]).
+-export_type([name/0]).
 
 -export([add/2]).
 -export([add_group/3]).

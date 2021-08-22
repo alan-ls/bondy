@@ -56,15 +56,19 @@
 
 
 -record(state, {
-    frame_type              ::  bondy_wamp_fsm:frame_type(),
-    protocol_state          ::  bondy_wamp_fsm:state() | undefined,
+    frame_type              ::  bondy_session:frame_type(),
+    peername                ::  peername(),
+    real_peername           ::  maybe(inet:ip_address()),
+    encoding                ::  encoding(),
     auth_token              ::  map(),
     hibernate = false       ::  boolean(),
     ping_enabled            ::  boolean(),
     ping_interval           ::  timeout(),
-    ping_interval_ref       ::  reference() | undefined,
+    ping_interval_ref       ::  maybe(reference()),
     ping_max_attempts       ::  integer(),
-    ping_attempts = 0       ::  integer()
+    ping_attempts = 0       ::  integer(),
+    log_meta = #{}          ::  map(),
+    session                 ::  maybe(bondy_session:t())
 }).
 
 -type state()               ::  #state{}.
@@ -96,9 +100,10 @@ init(Req0, _) ->
     %% select one of these subprotocol and send it back to the client,
     %% otherwise the client might decide to close the connection, assuming no
     %% correct subprotocol was found.
-    ClientIP = bondy_http_utils:client_ip(Req0),
     Subprotocols = cowboy_req:parse_header(?SUBPROTO_HEADER, Req0),
 
+    Peername = cowboy_req:peer(Req0),
+    RealPeername = bondy_http_utils:real_peername(Req0),
 
     try
 
@@ -108,7 +113,13 @@ init(Req0, _) ->
         %% we can verify it and immediately authenticate the client using
         %% the token stored information.
         AuthToken = maybe_token(Req0),
-        State1 = #state{auth_token = AuthToken},
+
+        State0 = #state{
+            peername = Peername,
+            real_peername = RealPeername,
+            auth_token = AuthToken
+        },
+        State1 = State0#state{log_meta = log_meta(State0)},
 
         do_init(Subproto, BinProto, Req0, State1)
 
@@ -121,8 +132,8 @@ init(Req0, _) ->
 
         throw:missing_subprotocol ->
             _ = lager:info(
-                "Closing WS connection. Missing value for header '~s'; " "client_ip=~s",
-                [?SUBPROTO_HEADER, ClientIP]
+                "Closing WS connection. Missing value for header '~s'; " "real_peername=~s",
+                [?SUBPROTO_HEADER, RealPeername]
             ),
             %% Returning ok will cause the handler
             %% to stop in websocket_handle
@@ -132,8 +143,8 @@ init(Req0, _) ->
         throw:invalid_subprotocol ->
             %% At the moment we only support WAMP, not plain WS
             _ = lager:info(
-                "Closing WS connection. Initialised without a valid value for http header '~s'; value=~p, client_ip=~s",
-                [?SUBPROTO_HEADER, Subprotocols, ClientIP]
+                "Closing WS connection. Initialised without a valid value for http header '~s'; value=~p, real_peername=~s",
+                [?SUBPROTO_HEADER, Subprotocols, RealPeername]
             ),
             %% Returning ok will cause the handler
             %% to stop in websocket_handle
@@ -160,7 +171,7 @@ init(Req0, _) ->
 %% Initialises the WS connection.
 %% @end
 %% -----------------------------------------------------------------------------
-websocket_init(#state{protocol_state = undefined} = St) ->
+websocket_init(#state{session = undefined} = St) ->
     %% This will close the WS connection
     Frame = {
         close,
@@ -179,7 +190,7 @@ websocket_init(St) ->
 %% Handles frames sent by client
 %% @end
 %% -----------------------------------------------------------------------------
-websocket_handle(Data, #state{protocol_state = undefined} = St) ->
+websocket_handle(Data, #state{session = undefined} = St) ->
     %% At the moment we only support WAMP, so we stop immediately.
     %% TODO This should be handled by the websocket_init callback above,
     %% review and eliminate.
@@ -202,19 +213,19 @@ websocket_handle({pong, <<"bondy">>}, St0) ->
 
 
 websocket_handle({T, Data}, #state{frame_type = T} = St0) ->
-    case bondy_wamp_fsm:handle_inbound(Data, St0#state.protocol_state) of
-        {ok, PSt} ->
-            {ok, St0#state{protocol_state = PSt}};
-        {reply, L, PSt} ->
-            reply(T, L, St0#state{protocol_state = PSt});
-        {stop, PSt} ->
-            {stop, St0#state{protocol_state = PSt}};
-        {stop, L, PSt} ->
+    case bondy_session:handle_inbound(Data, St0#state.session) of
+        {ok, Session} ->
+            {ok, St0#state{session = Session}};
+        {reply, L, Session} ->
+            reply(T, L, St0#state{session = Session});
+        {stop, Session} ->
+            {stop, St0#state{session = Session}};
+        {stop, L, Session} ->
             self() ! {stop, normal},
-            reply(T, L, St0#state{protocol_state = PSt});
-        {stop, Reason, L, PSt} ->
+            reply(T, L, St0#state{session = Session});
+        {stop, Reason, L, Session} ->
             self() ! {stop, Reason},
-            reply(T, L, St0#state{protocol_state = PSt})
+            reply(T, L, St0#state{session = Session})
     end;
 
 websocket_handle(Data, St) ->
@@ -344,18 +355,18 @@ terminate(Other, _Req, St) ->
 
 %% @private
 handle_outbound(T, M, St) ->
-    case bondy_wamp_fsm:handle_outbound(M, St#state.protocol_state) of
-        {ok, Bin, PSt} ->
-            {reply, frame(T, Bin), St#state{protocol_state = PSt}};
-        {stop, PSt} ->
-            {stop, St#state{protocol_state = PSt}};
-        {stop, Bin, PSt} ->
+    case bondy_session:handle_outbound(M, St#state.session) of
+        {ok, Bin, Session} ->
+            {reply, frame(T, Bin), St#state{session = Session}};
+        {stop, Session} ->
+            {stop, St#state{session = Session}};
+        {stop, Bin, Session} ->
             self() ! {stop, normal},
-            reply(T, [Bin], St#state{protocol_state = PSt});
-        {stop, Bin, PSt, Time} when is_integer(Time), Time > 0 ->
+            reply(T, [Bin], St#state{session = Session});
+        {stop, Bin, Session, Time} when is_integer(Time), Time > 0 ->
             erlang:send_after(
                 Time, self(), {stop, normal}),
-            reply(T, [Bin], St#state{protocol_state = PSt})
+            reply(T, [Bin], St#state{session = Session})
     end.
 
 
@@ -369,30 +380,44 @@ maybe_token(Req) ->
 
 
 %% @private
-do_init({ws, FrameType, _Enc} = Subproto, BinProto, Req0, State) ->
-    Peer = cowboy_req:peer(Req0),
-    AuthToken = State#state.auth_token,
-    ProtocolOpts = #{auth_token => AuthToken},
-    AllOpts = maps_utils:from_property_list(bondy_config:get(wamp_websocket)),
-    {PingOpts, Opts} = maps:take(ping, AllOpts),
+do_init({ws, FrameType, Encoding} = Subproto, BinProto, Req0, State) ->
+    #state{
+        peername = Peername,
+        real_peername = RealPeername,
+        auth_token = _AuthToken  %% when getting token from cookie
+    } = State,
 
-    case bondy_wamp_fsm:init(Subproto, Peer, ProtocolOpts) of
+    ConnInfo = bondy_connection:new(?MODULE, self(), #{
+        peername => Peername,
+        real_peername => RealPeername,
+        transport => ws,
+        encoding => Encoding
+    }),
+
+    case bondy_session:new(Subproto, ConnInfo, #{}) of
         {ok, CBState} ->
+            AllOpts = maps_utils:from_property_list(
+                bondy_config:get(wamp_websocket)
+            ),
+            {PingOpts, Opts} = maps:take(ping, AllOpts),
+
             St = #state{
                 frame_type = FrameType,
-                protocol_state = CBState,
+                session = CBState,
                 ping_enabled = maps:get(enabled, PingOpts),
                 ping_interval = maps:get(interval, PingOpts),
                 ping_max_attempts = maps:get(max_attempts, PingOpts)
             },
             Req1 = cowboy_req:set_resp_header(?SUBPROTO_HEADER, BinProto, Req0),
             {cowboy_websocket, Req1, St, Opts};
+
         {error, _Reason} ->
             %% Returning ok will cause the handler to
             %% stop in websocket_handle
             Req1 = cowboy_req:reply(?HTTP_BAD_REQUEST, Req0),
             {ok, Req1, undefined}
     end.
+
 
 
 %% -----------------------------------------------------------------------------
@@ -402,7 +427,7 @@ do_init({ws, FrameType, _Enc} = Subproto, BinProto, Req0, State) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec select_subprotocol(list(binary()) | undefined) ->
-    {ok, bondy_wamp_fsm:subprotocol(), binary()}
+    {ok, bondy_session:subprotocol(), binary()}
     | no_return().
 
 select_subprotocol(undefined) ->
@@ -411,10 +436,12 @@ select_subprotocol(undefined) ->
 select_subprotocol(L) when is_list(L) ->
     try
         Fun = fun(X) ->
-            case bondy_wamp_fsm:validate_subprotocol(X) of
+            case bondy_data_validators:subprotocol(X) of
                 {ok, SP} ->
                     throw({break, SP, X});
-                {error, invalid_subprotocol} ->
+                true ->
+                    throw({break, X, X});
+                false ->
                     ok
             end
         end,
@@ -432,7 +459,7 @@ do_terminate(undefined) ->
 
 do_terminate(St) ->
     ok = cancel_timer(St#state.ping_interval_ref),
-    bondy_wamp_fsm:terminate(St#state.protocol_state).
+    bondy_session:terminate(St#state.session).
 
 
 
@@ -453,8 +480,25 @@ frame(Type, E) when Type == text orelse Type == binary ->
 
 
 %% @private
+log_meta(State) ->
+    PeernameBin = inet_utils:peername_to_binary(State#state.peername),
+    RealPeernameBin = case State#state.real_peername of
+        undefined ->
+            undefined;
+        Value ->
+            inet_utils:peername_to_binary(Value)
+    end,
+
+    #{
+        frame_type => binary,
+        peername => PeernameBin,
+        protocol => wamp,
+        protocol_transport => ws,
+        real_peername => RealPeernameBin
+    }.
 
 
+%% @private
 log(Level, Prefix, Head, #state{} = St)
 when is_binary(Prefix) orelse is_list(Prefix), is_list(Head) ->
     Format = iolist_to_binary([
@@ -465,15 +509,14 @@ when is_binary(Prefix) orelse is_list(Prefix), is_list(Head) ->
         >>
     ]),
 
-    Ctxt = bondy_wamp_fsm:context(St#state.protocol_state),
 
     Tail = [
-        bondy_wamp_protocol:realm_uri(St#state.protocol_state),
-        bondy_wamp_fsm:session_id(St#state.protocol_state),
-        bondy_context:peername(Ctxt),
-        bondy_wamp_fsm:agent(St#state.protocol_state),
+        bondy_session:realm_uri(St#state.session),
+        bondy_session:id(St#state.session),
+        bondy_session:peername(St#state.session),
+        bondy_session:agent(St#state.session),
         St#state.frame_type,
-        bondy_context:encoding(Ctxt)
+        St#state.encoding
     ],
     lager:log(Level, self(), Format, lists:append(Head, Tail));
 

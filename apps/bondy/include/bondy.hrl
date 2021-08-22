@@ -113,29 +113,15 @@
 %% =============================================================================
 
 
--type local_peer_id()   ::  {
-    Realm       ::  binary(),
-    SessionId   ::  integer(),
-    Node        ::  atom(),
-    Pid         ::  pid()
-}.
-
--type remote_peer_id()  ::  {
-    Realm       ::  binary(),
-    SessionId   ::  integer(),
-    Node        ::  atom(),
-    Pid         ::  pid() | list() |undefined
-}.
-
--type peer_id()             ::  local_peer_id() | remote_peer_id().
-
+-type peername()            ::  {inet:ip_address(), inet:port_number()}.
 -type maybe(T)              ::  T | undefined.
+-type socket()              ::  inet:socket() | socket:socket().
 
--type peername()            ::  {inet:ip_address(), non_neg_integer()}.
 
 %% =============================================================================
 %% UTILS
 %% =============================================================================
+
 
 -define(EOT, '$end_of_table').
 -define(CHARS2BIN(Chars), unicode:characters_to_binary(Chars, utf8, utf8)).

@@ -328,8 +328,8 @@ check_proof(ProvidedProof, _, ClientSignature, StoredKey) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-auth_message(AuthId, ClientNonce, ServerNonce, Salt, Iterations) ->
-    auth_message(AuthId, ClientNonce, ServerNonce, Salt, Iterations, "", "").
+auth_message(Username, ClientNonce, ServerNonce, Salt, Iterations) ->
+    auth_message(Username, ClientNonce, ServerNonce, Salt, Iterations, "", "").
 
 
 %% -----------------------------------------------------------------------------
@@ -337,11 +337,11 @@ auth_message(AuthId, ClientNonce, ServerNonce, Salt, Iterations) ->
 %% @end
 %% -----------------------------------------------------------------------------
 auth_message(
-    AuthId, ClientNonce, ServerNonce, Salt, Iterations, CBindName, CBindData) ->
+    Username, ClientNonce, ServerNonce, Salt, Iter, CBindName, CBindData) ->
 
     iolist_to_binary([
-        client_first_bare(AuthId, ClientNonce), ",",
-        server_first(ServerNonce, Salt, Iterations), ",",
+        client_first_bare(Username, ClientNonce), ",",
+        server_first(ServerNonce, Salt, Iter), ",",
         client_final_no_proof(CBindName, CBindData, ServerNonce)
     ]).
 
@@ -447,9 +447,9 @@ memory_to_integer(_, _) ->
 
 
 %% @private
-client_first_bare(AuthId, ClientNonce) ->
+client_first_bare(Username, ClientNonce) ->
     [
-        "n=", stringprep:resourceprep(escape(AuthId)), ",",
+        "n=", stringprep:resourceprep(escape(Username)), ",",
         "r=", base64:encode(ClientNonce)
     ].
 

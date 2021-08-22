@@ -25,6 +25,18 @@
 -include("bondy.hrl").
 -include("bondy_uris.hrl").
 
+-type session_map()                 ::  #{
+    session => id(),
+    authid => id(),
+    authrole => maybe(binary()),
+    authmethod => binary(),
+    authprovider => binary(),
+    'x_authroles' => [binary()],
+    transport => #{
+        peername => maybe(binary()),
+        real_peername => maybe(binary())
+    }
+}.
 
 
 -export([handle_call/2]).
@@ -44,17 +56,15 @@
 -spec handle_call(M :: wamp_message:call(), Ctxt :: bony_context:t()) -> ok.
 
 handle_call(M, Ctxt) ->
-    PeerId = bondy_context:peer_id(Ctxt),
-
     try
         Reply = do_handle(M, Ctxt),
-        bondy:send(PeerId, Reply)
+        bondy_context:reply(Reply, Ctxt)
     catch
         _:Reason ->
             %% We catch any exception from do_handle and turn it
             %% into a WAMP Error
             Error = bondy_wamp_utils:maybe_error({error, Reason}, M),
-            bondy:send(PeerId, Error)
+            bondy_context:reply(Error, Ctxt)
     end.
 
 
@@ -68,14 +78,14 @@ handle_call(M, Ctxt) ->
 do_handle(#call{procedure_uri = ?WAMP_SESSION_GET} = M, Ctxt) ->
     [RealmUri, SessionId] = bondy_wamp_utils:validate_call_args(M, Ctxt, 2),
     case bondy_session:lookup(RealmUri, SessionId) of
-        {error, not_found} ->
-            bondy_wamp_utils:no_such_session_error(SessionId);
-        Session ->
+        {ok, Session} ->
             wamp_message:result(
                 M#call.request_id,
                 #{},
-                [bondy_session:to_external(Session)]
-            )
+                [session_to_map(Session)]
+            );
+        {error, not_found} ->
+            {error, bondy_wamp_utils:no_such_session_error(SessionId)}
     end;
 
 
@@ -476,3 +486,25 @@ list_subscription_subscribers(_RealmUri, _RegId) ->
 
 count_subscribers(_RealmUri, _RegId) ->
     {error, not_implemented}.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec session_to_map(bondy_session:t()) -> session_map().
+
+session_to_map(Session) ->
+    ConnInfo = bondy_session:connection_info(Session),
+    #{
+        session => bondy_session:id(Session),
+        authid => bondy_session:authid(Session),
+        authrole => bondy_session:authrole(Session),
+        authmethod => bondy_session:authmethod(Session),
+        authprovider => bondy_session:authprovider(Session),
+        'x_authroles' => bondy_session:authroles(Session),
+        transport => #{
+            peername => bondy_connection:peername_bin(ConnInfo),
+            real_peername => bondy_connection:real_peername_bin(ConnInfo)
+        }
+    }.

@@ -24,7 +24,7 @@
 -include("bondy.hrl").
 -include_lib("wamp/include/wamp.hrl").
 
--record(peer_message, {
+-record(bondy_peer_message, {
     id              ::  binary(),
     realm_uri       ::  uri(),
     %% Supporting process identifiers in Partisan, without changing the
@@ -33,8 +33,9 @@
     %% other node.
     %% We use the pid-to-bin trick since we will be using the pid to generate
     %% an ACK.
-    from            ::  remote_peer_id(),
-    to              ::  remote_peer_id(),
+    %% TODO update this when we upgrade to latest plum_db (partisan 4.0)
+    from            ::  bondy_session:ref(),
+    to              ::  bondy_session:ref(),
     payload         ::  wamp_invocation()
                         | wamp_error()
                         | wamp_result()
@@ -45,7 +46,7 @@
 }).
 
 
--opaque t()     ::  #peer_message{}.
+-opaque t()     ::  #bondy_peer_message{}.
 
 -export_type([t/0]).
 
@@ -76,16 +77,16 @@ new(From0, To0, Payload0, Opts) ->
     element(2, To0) =/= MyNode orelse error(badarg),
 
     %% FromPid = bondy_utils:pid_to_bin(element(4, From0)),
-    From1 = setelement(4, From0, undefined),
+    From = bondy_session:make_remote_ref(From0),
 
     %% ToPid = bondy_utils:pid_to_bin(element(4, To0)),
-    To1 = setelement(4, To0, undefined),
+    To = bondy_session:make_remote_ref(To0),
 
-    #peer_message{
-        payload = validate_payload(Payload0),
+    #bondy_peer_message{
         id = ksuid:gen_id(millisecond),
-        to = To1,
-        from = From1,
+        to = To,
+        from = From,
+        payload = validate_payload(Payload0),
         options = Opts
     }.
 
@@ -94,7 +95,7 @@ new(From0, To0, Payload0, Opts) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-is_message(#peer_message{}) -> true;
+is_message(#bondy_peer_message{}) -> true;
 is_message(_) -> false.
 
 
@@ -102,56 +103,56 @@ is_message(_) -> false.
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-id(#peer_message{id = Val}) -> Val.
+id(#bondy_peer_message{id = Val}) -> Val.
 
 
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-realm_uri(#peer_message{from = Val}) -> element(1, Val).
+realm_uri(#bondy_peer_message{from = Val}) -> element(1, Val).
 
 
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-peer_node(#peer_message{to = Val}) -> element(2, Val).
+peer_node(#bondy_peer_message{to = Val}) -> element(2, Val).
 
 
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-from(#peer_message{from = Val}) -> Val.
+from(#bondy_peer_message{from = Val}) -> Val.
 
 
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-to(#peer_message{to = Val}) -> Val.
+to(#bondy_peer_message{to = Val}) -> Val.
 
 
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-payload(#peer_message{payload = Val}) -> Val.
+payload(#bondy_peer_message{payload = Val}) -> Val.
 
 
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-payload_type(#peer_message{payload = Val}) -> element(1, Val).
+payload_type(#bondy_peer_message{payload = Val}) -> element(1, Val).
 
 
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-options(#peer_message{options = Val}) -> Val.
+options(#bondy_peer_message{options = Val}) -> Val.
 
 
 

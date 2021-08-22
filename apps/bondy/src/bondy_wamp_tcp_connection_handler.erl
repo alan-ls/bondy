@@ -24,36 +24,43 @@
 -module(bondy_wamp_tcp_connection_handler).
 -behaviour(gen_server).
 -behaviour(ranch_protocol).
+-behaviour(bondy_connection_handler).
 -include("bondy.hrl").
 -include_lib("wamp/include/wamp.hrl").
 
 
 -define(TIMEOUT, ?PING_TIMEOUT * 2).
 -define(PING_TIMEOUT, 10000). % 10 secs
-
+%% 2^24 bytes, according to
+%% https://wamp-proto.org/_static/gen/wamp_latest_ietf.html#handshake
+-define(MAX_FRAME_LEN, 16777216).
 
 -record(state, {
-    socket                  ::  gen_tcp:socket(),
-    peername                ::  binary(),
-    real_peername           ::  binary() | undefined,
+    %% Immutable state
     transport               ::  module(),  %% ranch_tcp | ranch_ssl
-    frame_type              ::  frame_type(),
+    socket                  ::  socket(),
+    peername                ::  peername(),
+    real_peername           ::  maybe(peername()),
+    log_meta = #{}          ::  map(),
     encoding                ::  atom(),
-    max_len                 ::  pos_integer(),
+    max_length              ::  pos_integer(),
+    start_time              ::  integer(),
+    %% Mutable state
+    active_n = once         ::  once | -32768..32767,
+    hibernate = false       ::  boolean(),
     ping_sent = false       ::  {true, binary(), reference()} | false,
     ping_attempts = 0       ::  non_neg_integer(),
     ping_max_attempts = 2   ::  non_neg_integer(),
-    hibernate = false       ::  boolean(),
-    start_time              ::  integer(),
-    fsm_state               ::  bondy_wamp_fsm:state() | undefined,
-    active_n = once         ::  once | -32768..32767,
-    buffer = <<>>           ::  binary(),
-    shutdown_reason         ::  term() | undefined
+    shutdown_reason         ::  maybe(term()),
+    session                 ::  maybe(bondy_session:t()),
+    buffer = <<>>           ::  binary()
 }).
 -type state() :: #state{}.
 
 
 -export([start_link/4]).
+-export([to_frame/2]).
+-export([send/3]).
 -export([send/4]).
 
 -export([init/1]).
@@ -81,20 +88,93 @@ start_link(Ref, Socket, Transport, Opts) ->
 
 
 
+%% =============================================================================
+%% BONDY_CONNECTION_HANDLER CALLBACKS
+%% =============================================================================
+
+
+
 %% -----------------------------------------------------------------------------
 %% @doc Send data directly to a socket.
 %% @end
 %% -----------------------------------------------------------------------------
+-spec to_frame(Data :: iodata(), Opts :: map()) ->
+    iodata() | no_return().
+
+to_frame(Data, Opts) ->
+    try
+        MaxLen = maps:get(max_length, Opts, ?MAX_FRAME_LEN),
+        maybe_too_big(?RAW_FRAME(Data), MaxLen)
+    catch
+        throw:Reason ->
+            error(Reason)
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Send data directly to a socket.
+%% @end
+%% -----------------------------------------------------------------------------
+%% -----------------------------------------------------------------------------
 -spec send(
-    Transport :: transport(),
-    Socket :: port(),
+    Transport :: bondy_connection:ranch_transport(),
+    Socket :: socket(),
+    Data :: iodata()) ->
+    ok | {error, busy | badarg | message_too_big}.
+
+
+send(Transport, Socket, Data) ->
+    send(Transport, Socket, Data, []).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Send data directly to a socket.
+%% The following is lifted from
+%% https://github.com/erlang/otp/blob/master/erts/preloaded/src/prim_inet.erl
+%%
+%% We do this to avoid the selective receive in send/3 as it can take a while
+%% when the inbox has many messages.
+%% TODO not sure how this will work with the new Socket API.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec send(
+    Transport :: bondy_connection:ranch_transport(),
+    Socket :: socket(),
     Data :: iodata(),
-    Opts :: list()) ->
-    ok | {error, busy | einval}.
+    Opts :: [nosuspend | force]) ->
+    ok | {error, busy | badarg | notsup}.
 
-send(Transport, Socket, Data, Opts) ->
-    send_frame(Transport, Socket, ?RAW_FRAME(Data), Opts).
+send(Transport, Socket, Data, Opts)
+when (Transport == ranch_tcp orelse Transport == ranch_ssl)
+andalso is_port(Socket) ->
+    %% Sends data to a port. Same as Port ! {PortOwner, {command, Data}} except
+    %% for the error behavior and being synchronous (see below). Any process
+    %% can send data to a port with port_command/2, not only the port owner
+    %% (the connected process).
 
+    %% If the port is busy, the calling process is suspended until the port is
+    %% not busy any more, unless the option nosuspend is passed.
+    try erlang:port_command(Socket, Data, Opts) of
+        false ->
+            %% Port busy and nosuspend option passed
+            %% The calling process is not suspended,
+            %% the port command was aborted
+            {error, busy};
+        true ->
+            %% Here is where the original code does a selective receive
+            %% to find the message {inet_reply, Socket, State} as we do not to
+            %% the receive here, we will get it through gen_server's
+            %% handle_info callback
+            ok
+    catch
+        error:badarg ->
+            {error, badarg};
+	    error:Reason ->
+	        {error, Reason}
+    end;
+
+send(Transport, Socket, Data, _Opts) ->
+    Transport:send(Socket, Data).
 
 
 
@@ -104,29 +184,31 @@ send(Transport, Socket, Data, Opts) ->
 
 
 
-init({Ref, Socket, Transport, _Opts0}) ->
-    St0 = #state{
-        start_time = erlang:monotonic_time(second),
-        transport = Transport
-    },
+init({Ref, Socket, RanchTransport, _Opts0}) ->
+    try
 
-    St1 = case ranch_handshake(Ref, Transport) of
-        {ok, Socket, #{src_address := IP, src_port := Port}} ->
-            St0#state{
-                socket = Socket,
-                peername = peername(Socket),
-                real_peername = inet_utils:peername_to_binary({IP, Port})
-            };
-        {ok, Socket, _Info} ->
-            St0#state{
-                socket = Socket,
-                peername = peername(Socket)
-            }
-    end,
+        {ok, Socket, Info} = ranch_handshake(Ref, RanchTransport),
 
-    ok = socket_opened(St1),
+        Peername = peername(Socket),
+        RealPeername = real_peername(Info),
 
-    gen_server:enter_loop(?MODULE, [], St1, ?TIMEOUT).
+        State0 = #state{
+            start_time = erlang:monotonic_time(second),
+            transport = RanchTransport,
+            socket = Socket,
+            peername = Peername,
+            real_peername = RealPeername
+        },
+        State1 = State0#state{log_meta = log_meta(State0)},
+
+        ok = socket_opened(State1),
+
+        gen_server:enter_loop(?MODULE, [], State1, ?TIMEOUT)
+
+    catch
+        throw:Reason ->
+            {stop, Reason}
+    end.
 
 
 handle_call(Msg, From, State) ->
@@ -140,16 +222,16 @@ handle_cast(Msg, State) ->
 
 
 handle_info({inet_reply, _, ok}, State) ->
-    %% see send_frame/4 below
+    %% see send/4 below
     {noreply, State, ?TIMEOUT};
 
 handle_info({inet_reply, _, Status}, State) ->
-    %% see send_frame/4 below
+    %% see send/4 below
     {stop, {send_failed, Status}, State};
 
 handle_info(
     {tcp, Socket, <<?RAW_MAGIC:8, MaxLen:4, Encoding:4, _:16>>},
-    #state{socket = Socket, fsm_state = undefined} = St0) ->
+    #state{socket = Socket, session = undefined} = St0) ->
     case handle_handshake(MaxLen, Encoding, St0) of
         {ok, St1} ->
             case maybe_active_once(St1) of
@@ -164,7 +246,7 @@ handle_info(
 
 handle_info(
     {tcp, Socket, Data},
-    #state{socket = Socket, fsm_state = undefined} = St) ->
+    #state{socket = Socket, session = undefined} = St) ->
     %% RFC: After a _Client_ has connected to a _Router_, the _Router_ will
     %% first receive the 4 octets handshake request from the _Client_.
     %% If the _first octet_ differs from "0x7F", it is not a WAMP-over-
@@ -258,9 +340,9 @@ when T =/= undefined andalso S =/= undefined ->
     ok = close_socket(Reason, State),
     terminate(Reason, State#state{transport = undefined, socket = undefined});
 
-terminate(Reason, #state{fsm_state = P} = State) when P =/= undefined ->
+terminate(Reason, #state{session = P} = State) when P =/= undefined ->
     ok = bondy_wamp_fsm:terminate(P),
-    terminate(Reason, State#state{fsm_state = undefined});
+    terminate(Reason, State#state{session = undefined});
 
 terminate(_, _) ->
     ok.
@@ -280,7 +362,7 @@ code_change(_OldVsn, State, _Extra) ->
 -spec ranch_handshake(atom(), module()) ->
     {ok, Socket :: port(), Info :: map()}.
 
-ranch_handshake(Ref, Transport) ->
+ranch_handshake(Ref, RanchTransport) ->
     %% We must call ranch:accept_ack/1 before doing any socket operation.
     %% This will ensure the connection process is the owner of the socket.
     %% It expects the listener’s name as argument.
@@ -288,7 +370,7 @@ ranch_handshake(Ref, Transport) ->
 
     Info = case bondy_config:get([Ref, proxy_protocol], false) of
         true ->
-            {ok, ProxyInfo} = maybe_error(ranch:recv_proxy_header(Ref, 1000)),
+            {ok, ProxyInfo} = maybe_throw(ranch:recv_proxy_header(Ref, 1000)),
             ProxyInfo;
         false ->
             #{}
@@ -299,16 +381,16 @@ ranch_handshake(Ref, Transport) ->
     SocketOpts = [{active, once}, {packet, 0} | Opts],
 
     {ok, Socket} = ranch:handshake(Ref, SocketOpts),
-    ok = maybe_error(Transport:setopts(Socket, SocketOpts)),
+    ok = maybe_throw(RanchTransport:setopts(Socket, SocketOpts)),
 
     {ok, Socket, Info}.
 
 
 %% @private
-maybe_error({error, Reason}) ->
-    error(Reason);
+maybe_throw({error, Reason}) ->
+    throw(Reason);
 
-maybe_error(Term) ->
+maybe_throw(Term) ->
     Term.
 
 
@@ -317,8 +399,9 @@ maybe_error(Term) ->
 -spec handle_data(Data :: binary(), State :: state()) ->
     {ok, state()} | {stop, raw_error(), state()}.
 
-handle_data(<<0:5, _:3, Len:24, _Data/binary>>, #state{max_len = MaxLen} = St)
-when Len > MaxLen ->
+handle_data(
+    <<0:5, _:3, Len:24, _Data/binary>>,
+    #state{max_length = MaxLen} = St) when Len > MaxLen ->
     %% RFC: During the connection, Router MUST NOT send messages to the Client
     %% longer than the LENGTH requested by the Client, and the Client MUST NOT
     %% send messages larger than the maximum requested by the Router in it's
@@ -328,37 +411,37 @@ when Len > MaxLen ->
     _ = log(
         error,
         "Client committed a WAMP protocol violation; "
-        "reason=maximum_message_length_exceeded, message_length=~p,",
+        "reason=message_too_big, max_message_length=~p,",
         [Len],
         St
     ),
-    {stop, maximum_message_length_exceeded, St};
+    {stop, message_too_big, St};
 
 handle_data(<<0:5, 0:3, Len:24, Data/binary>>, St)
 when byte_size(Data) >= Len ->
     %% We received a WAMP message
     %% Len is the number of octets after serialization
     <<Mssg:Len/binary, Rest/binary>> = Data,
-    case bondy_wamp_fsm:handle_inbound(Mssg, St#state.fsm_state) of
+    case bondy_wamp_fsm:handle_inbound(Mssg, St#state.session) of
         {ok, PSt} ->
-            handle_data(Rest, St#state{fsm_state = PSt});
+            handle_data(Rest, St#state{session = PSt});
         {reply, L, PSt} ->
-            St1 = St#state{fsm_state = PSt},
+            St1 = St#state{session = PSt},
             ok = send(L, St1),
             handle_data(Rest, St1);
         {stop, PSt} ->
-            {stop, normal, St#state{fsm_state = PSt}};
+            {stop, normal, St#state{session = PSt}};
         {stop, L, PSt} ->
-            St1 = St#state{fsm_state = PSt},
+            St1 = St#state{session = PSt},
             ok = send(L, St1),
             {stop, normal, St1};
         {stop, normal, L, PSt} ->
-            St1 = St#state{fsm_state = PSt},
+            St1 = St#state{session = PSt},
             ok = send(L, St1),
             {stop, normal, St1};
         {stop, Reason, L, PSt} ->
             St1 = St#state{
-                fsm_state = PSt,
+                session = PSt,
                 shutdown_reason = Reason
             },
             ok = send(L, St1),
@@ -368,7 +451,7 @@ when byte_size(Data) >= Len ->
 handle_data(<<0:5, 1:3, Len:24, Data/binary>>, St) ->
     %% We received a PING, send a PONG
     <<Payload:Len/binary, Rest/binary>> = Data,
-    ok = send_frame(<<0:5, 2:3, Len:24, Payload/binary>>, St),
+    ok = send(<<0:5, 2:3, Len:24, Payload/binary>>, St),
     handle_data(Rest, St);
 
 handle_data(<<0:5, 2:3, Len:24, Data/binary>>, St) ->
@@ -399,7 +482,7 @@ handle_data(<<0:5, R:3, Len:24, Data/binary>>, St) when R > 2 ->
     %% The three bits (R) encode the type of the transport message,
     %% values 3 to 7 are reserved
     <<Mssg:Len, Rest/binary>> = Data,
-    ok = send_frame(error_number(use_of_reserved_bits), St),
+    ok = send(error_number(use_of_reserved_bits), St),
     _ = log(
         error,
         "Client committed a WAMP protocol violation, message dropped; reason=~p, value=~p, message=~p,",
@@ -424,19 +507,29 @@ handle_data(Data, St) ->
     | {stop, normal, state()}.
 
 handle_outbound(M, St0) ->
-    case bondy_wamp_fsm:handle_outbound(M, St0#state.fsm_state) of
+    case bondy_wamp_fsm:handle_outbound(M, St0#state.session) of
         {ok, Bin, PSt} ->
-            St1 = St0#state{fsm_state = PSt},
+            St1 = St0#state{session = PSt},
             case send(Bin, St1) of
                 ok ->
+                    {noreply, St1, ?TIMEOUT};
+                {error, message_too_big} ->
+                    _ = log(
+                        warning,
+                        "Message dropped as it exceeds the maximum message length;",
+                        [],
+                        St1
+                    ),
                     {noreply, St1, ?TIMEOUT};
                 {error, Reason} ->
                     {stop, Reason, St1}
             end;
+
         {stop, PSt} ->
-            {stop, normal, St0#state{fsm_state = PSt}};
+            {stop, normal, St0#state{session = PSt}};
+
         {stop, Bin, PSt} ->
-            St1 = St0#state{fsm_state = PSt},
+            St1 = St0#state{session = PSt},
             case send(Bin, St1) of
                 ok ->
                     {stop, normal, St1};
@@ -446,9 +539,9 @@ handle_outbound(M, St0) ->
 
         {stop, Bin, PSt, Time} when is_integer(Time), Time > 0 ->
             %% We send ourselves a message to stop after Time
-            St1 = St0#state{fsm_state = PSt},
-            erlang:send_after(
-                Time, self(), {stop, normal}),
+            St1 = St0#state{session = PSt},
+            erlang:send_after(Time, self(), {stop, normal}),
+
             case send(Bin, St1) of
                 ok ->
                     {noreply, St1};
@@ -464,7 +557,7 @@ handle_handshake(Len, Enc, St) ->
         init_wamp(Len, Enc, St)
     catch
         throw:Reason ->
-            ok = send_frame(error_number(Reason), St),
+            ok = send(error_number(Reason), St),
             _ = lager:error("WAMP protocol error, reason=~p", [Reason]),
             {stop, Reason, St}
     end.
@@ -473,28 +566,39 @@ handle_handshake(Len, Enc, St) ->
 %% @private
 init_wamp(Len, Enc, St0) ->
     MaxLen = validate_max_len(Len),
-    {FrameType, EncName} = validate_encoding(Enc),
+    Encoding = validate_encoding(Enc),
 
-    {ok, {_, _} = Peer} = inet:peername(St0#state.socket),
-    Proto = {raw, FrameType, EncName},
+    St1 = St0#state{
+        encoding = Encoding,
+        max_length = MaxLen
+    },
 
-    case bondy_wamp_fsm:init(Proto, Peer, #{}) of
+    Proto = {raw, binary, Encoding},
+
+    Conn = bondy_connection:new(?MODULE, self(), #{
+        transport =>  St1#state.transport,
+        socket => St1#state.socket,
+        encoding => St1#state.encoding,
+        max_length => St1#state.max_length,
+        peername => St1#state.peername,
+        real_peername => St1#state.peername
+    }),
+
+
+    case bondy_wamp_fsm:init(Proto, Conn) of
         {ok, CBState} ->
-            St1 = St0#state{
-                frame_type = FrameType,
-                encoding = EncName,
-                max_len = MaxLen,
-                fsm_state = CBState
+            St2 = St1#state{
+                session = CBState
             },
 
-            ok = send_frame(
-                <<?RAW_MAGIC, Len:4, Enc:4, 0:8, 0:8>>, St1
+            ok = send(
+                <<?RAW_MAGIC, Len:4, Enc:4, 0:8, 0:8>>, St2
             ),
 
-            _ = log(info, "Established connection with peer;", [], St1),
-            {ok, St1};
+            _ = log(info, "Established connection with peer;", [], St2),
+            {ok, St2};
         {error, Reason} ->
-            {stop, Reason, St0}
+            {stop, Reason, St1}
     end.
 
 %% -----------------------------------------------------------------------------
@@ -518,6 +622,16 @@ validate_max_len(_) ->
     throw(maximum_message_length_unacceptable).
 
 
+%% @private
+maybe_too_big(Frame, MaxLen) ->
+    byte_size(Frame) =< min(MaxLen, ?MAX_FRAME_LEN)
+    orelse throw(message_too_big),
+    Frame.
+
+
+
+
+
 %% -----------------------------------------------------------------------------
 %% @private
 %% @doc
@@ -528,17 +642,17 @@ validate_max_len(_) ->
 %% @end
 %% -----------------------------------------------------------------------------
 validate_encoding(1) ->
-    {binary, json};
+    json;
 
 validate_encoding(2) ->
-    {binary, msgpack};
+    msgpack;
 
 validate_encoding(N) ->
     case lists:keyfind(N, 2, bondy_config:get(wamp_serializers, [])) of
         {erl, N} ->
-            {binary, erl};
+            erl;
         {bert, N} ->
-            {binary, bert};
+            bert;
         undefined ->
             %% TODO define correct error return
             throw(serializer_unsupported)
@@ -566,8 +680,30 @@ error_number(maximum_connection_count_reached) ->?RAW_ERROR(4).
 %% error_reason(3) -> use_of_reserved_bits;
 %% error_reason(4) -> maximum_connection_count_reached.
 
+
 %% @private
-log(Level, Format, Args, #state{fsm_state = undefined})
+log_meta(State) ->
+    PeernameBin = inet_utils:peername_to_binary(State#state.peername),
+    RealPeernameBin = case State#state.real_peername of
+        undefined ->
+            undefined;
+        Value ->
+            inet_utils:peername_to_binary(Value)
+    end,
+
+    #{
+        frame_type => binary,
+        peername => PeernameBin,
+        protocol => wamp,
+        protocol_transport => raw,
+        real_peername => RealPeernameBin,
+        socket => State#state.socket,
+        transport => State#state.transport
+    }.
+
+
+%% @private
+log(Level, Format, Args, #state{session = undefined})
 when is_binary(Format) orelse is_list(Format), is_list(Args) ->
     lager:log(Level, self(), Format, Args);
 
@@ -581,19 +717,23 @@ when is_binary(Prefix) orelse is_list(Prefix), is_list(Head) ->
             ", message_max_length=~p, socket=~p"
         >>
     ]),
-    RealmUri = bondy_wamp_protocol:realm_uri(St#state.protocol_state),
-    SessionId = bondy_wamp_fsm:session_id(St#state.fsm_state),
-    Agent = bondy_wamp_fsm:agent(St#state.fsm_state),
+    SessionId = bondy_session:id(St#state.session),
+    Agent = bondy_session:agent(St#state.session),
+    #{
+        peername := Peername,
+        real_peername := RealPeername,
+        frame_type := FrameType
+    } = St#state.log_meta,
 
     Tail = [
         RealmUri,
         SessionId,
-        St#state.peername,
-        St#state.real_peername,
+        Peername,
+        RealPeername,
         Agent,
-        St#state.frame_type,
+        FrameType,
         St#state.encoding,
-        St#state.max_len,
+        St#state.max_length,
         St#state.socket
     ],
     lager:log(Level, self(), Format, lists:append(Head, Tail)).
@@ -682,7 +822,35 @@ send(L, #state{} = St) when is_list(L) ->
     lists:foreach(fun(Bin) -> send(Bin, St) end, L);
 
 send(Bin, #state{} = St) ->
-    send_frame(?RAW_FRAME(Bin), St).
+    try
+        %% TODO do not send immeditely, buffer until we get closer to MSS (1460
+        %% bytes)
+        %% A maximum transmission unit (MTU) is the largest packet or frame
+        %% size in bytes that can be sent in a packet- or frame-based network
+        %% e.g. TCP.
+        %% TCP uses the MTU to determine the maximum size of each packet in any
+        %% transmission. MTU is usually associated with the Ethernet protocol,
+        %% where a 1500-byte packet is the largest allowed in it (and hence
+        %% over most of the internet).
+        %% Larger packets will use IPv4 fragmentation, which divides the
+        %% datagram into pieces. Each piece is small enough to pass over the
+        %% single link that it is being fragmented for, using the MTU parameter
+        %% configured for that interface.
+        %% The best way to avoid fragmentation is to adjust the maximum segment
+        %% size or TCP MSS so the segment will adjust its size before reaching
+        %% the data link layer.
+        %% The total value of the IP and the TCP header is 40 bytes and
+        %% mandatory for each packet, which leaves us 1460 bytes for our data.
+        send(
+            St#state.transport,
+            St#state.socket,
+            maybe_too_big(?RAW_FRAME(Bin), St#state.max_length),
+            []
+        )
+    catch
+        throw:Reason ->
+            {error, Reason}
+    end.
 
 
 %% @private
@@ -697,7 +865,12 @@ send_ping(#state{} = St) ->
 %% @end
 %% -----------------------------------------------------------------------------
 send_ping(Bin, #state{} = St0) ->
-    ok = send_frame(<<0:5, 1:3, (byte_size(Bin)):24, Bin/binary>>, St0),
+    %% Crash if we cannot send ping
+    ok = send(
+        St0#state.transport,
+        St0#state.socket,
+        <<0:5, 1:3, (byte_size(Bin)):24, Bin/binary>>
+    ),
     Timeout = bondy_config:get(ping_timeout, ?PING_TIMEOUT),
     TimerRef = erlang:send_after(Timeout, self(), ping_timeout),
     St1 = St0#state{
@@ -707,78 +880,11 @@ send_ping(Bin, #state{} = St0) ->
     {ok, St1}.
 
 
-%% TODO do not send immeditely, buffer until we get closer to MSS (1460 bytes)
-%% A maximum transmission unit (MTU) is the largest packet or frame size in
-%% bytes that can be sent in a packet- or frame-based network e.g. TCP.
-%% TCP uses the MTU to determine the maximum size of each packet in any
-%% transmission. MTU is usually associated with the Ethernet protocol, where a
-%% 1500-byte packet is the largest allowed in it (and hence over most of the
-%% internet).
-%% Larger packets will use IPv4 fragmentation, which divides the datagram into
-%% pieces. Each piece is small enough to pass over the single link that it is
-%% being fragmented for, using the MTU parameter configured for that interface.
-%% The best way to avoid fragmentation is to adjust the maximum segment size or
-%% TCP MSS so the segment will adjust its size before reaching the data link
-%% layer.
-%% The total value of the IP and the TCP header is 40 bytes and mandatory for
-%% each packet, which leaves us 1460 bytes for our data.
-
 %% @private
--spec send_frame(binary(), state()) -> ok | {error, any()}.
-
-send_frame(Frame, #state{} = St) when is_binary(Frame) ->
-    send_frame(St#state.transport, St#state.socket, Frame).
-
-
-%% @private
-send_frame(Transport, Socket, Data) ->
-    send_frame(Transport, Socket, Data, []).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% The following is lifted from
-%% https://github.com/erlang/otp/blob/master/erts/preloaded/src/prim_inet.erl
-%%
-%% We do this to avoid the selective receive in send/3 as it can take a while
-%% when the inbox has many messages.
-%% TODO not sure how this will work with the new Socket API.
-%% @end
-%% -----------------------------------------------------------------------------
-
-send_frame(ranch_tcp, Socket, Data, Opts) when is_port(Socket) ->
-    %% This call is still synchronous
-    %% Notice that any process can send to a port using Port ! {PortOwner,
-    %% {command, Data}} as if it itself was the port owner.
-
-    %% If the port is busy, the calling process is suspended until the port is
-    %% not busy any more unles the option nosuspend is passed.
-    try erlang:port_command(Socket, Data, Opts) of
-        false ->
-            %% Port busy and nosuspend option passed
-            %% The calling process is not suspended,
-            %% the port command was aborted
-            {error, busy};
-        true ->
-            %% Here is where the original code does a selective receive
-            %% to find the message {inet_reply, Socket, State} as we do not to
-            %% the receive here, we will get it through gen_server's
-            %% handle_info callback
-            ok
-    catch
-	    error:_ ->
-	        {error, einval}
-    end;
-
-send_frame(Transport, Socket, Data, _Opts) ->
-    Transport:send(Socket, Data).
-
-
 peername(Socket) ->
     case inet:peername(Socket) of
-        {ok, {_, _} = Peer} ->
-            inet_utils:peername_to_binary(Peer);
+        {ok, {_, _} = Peername} ->
+            Peername;
         {ok, NonIPAddr} ->
 
             _ = lager:error(
@@ -787,7 +893,7 @@ peername(Socket) ->
                 " protocol=wamp, transport=raw",
                 [NonIPAddr]
             ),
-            error(invalid_socket);
+            throw(invalid_socket);
 
         {error, Reason} ->
             _ = lager:error(
@@ -795,5 +901,14 @@ peername(Socket) ->
                 " reason=~p, description=~p, protocol=wamp, transport=raw",
                 [Reason, inet:format_error(Reason)]
             ),
-            error(invalid_socket)
+            throw(invalid_socket)
     end.
+
+
+%% @private
+real_peername(#{src_address := RealIP, src_port := RealPort}) ->
+    {RealIP, RealPort};
+
+real_peername(_) ->
+    undefined.
+

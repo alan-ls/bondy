@@ -180,18 +180,20 @@ add_local_subscription(RealmUri, Uri, Opts, Pid) ->
     Type = subscription,
 
     Pattern = bondy_registry_entry:pattern(
-        Type, RealmUri, Node, undefined, Uri, Opts),
+        Type, RealmUri, Node, undefined, Uri, Opts
+    ),
     TrieKey = trie_key(Pattern),
+
     Trie = trie(Type),
 
     case art_server:match(TrieKey, Trie) of
         [] ->
-            PeerId = {RealmUri, Node, undefined, Pid},
+            PeerInfo = bondy_session:new(RealmUri, Node, Pid),
             RegId = case maps:find(subscription_id, Opts) of
                 {ok, N} -> N;
                 error -> bondy_utils:get_id(global)
             end,
-            Entry = bondy_registry_entry:new(Type, RegId, PeerId, Uri, Opts),
+            Entry = bondy_registry_entry:new(Type, RegId, PeerInfo, Uri, Opts),
             %% REVIEW this  will broadcast the local subscription to other nodes
             %% se we need to be sure not to duplicate events
             do_add(Entry);
@@ -242,8 +244,12 @@ add_local_subscription(RealmUri, Uri, Opts, Pid) ->
 
 add(Type, Uri, Options, Ctxt) ->
     RealmUri = bondy_context:realm_uri(Ctxt),
-    PeerId = bondy_context:peer_id(Ctxt),
-    {RealmUri, Node, SessionId, _} = PeerId,
+    PeerInfo = bondy_context:session_ref(Ctxt),
+
+    RealmUri = bondy_session:realm_uri(PeerInfo),
+    Node = bondy_session:node(PeerInfo),
+    SessionId = bondy_session:id(PeerInfo),
+
     Pattern = case Type of
         registration ->
             %% A session can register a procedure multiple times if
@@ -266,7 +272,7 @@ add(Type, Uri, Options, Ctxt) ->
         [] ->
             %% No matching registrations at all exists or
             %% No matching subscriptions for this SessionId exists
-            Entry = bondy_registry_entry:new(Type, PeerId, Uri, Options),
+            Entry = bondy_registry_entry:new(Type, PeerInfo, Uri, Options),
             do_add(Entry);
 
         [{_, EntryKey}] when Type == subscription ->
@@ -281,7 +287,7 @@ add(Type, Uri, Options, Ctxt) ->
         [{_, EntryKey} | _] when Type == registration ->
             EOpts = bondy_registry_entry:options(EntryKey),
             SharedEnabled = bondy_context:is_feature_enabled(
-                Ctxt, callee, shared_registration),
+                callee, shared_registration, Ctxt),
             NewPolicy = maps:get(invoke, Options, ?INVOKE_SINGLE),
             PrevPolicy = maps:get(invoke, EOpts, ?INVOKE_SINGLE),
             %% Shared Registration (RFC 13.3.9)
@@ -300,7 +306,7 @@ add(Type, Uri, Options, Ctxt) ->
             case Flag of
                 true ->
                     NewEntry = bondy_registry_entry:new(
-                        Type, PeerId, Uri, Options),
+                        Type, PeerInfo, Uri, Options),
                     do_add(NewEntry);
                 false ->
                     FullPrefix = full_prefix(Type, RealmUri),
@@ -344,7 +350,8 @@ when is_function(Task, 2) orelse Task == undefined ->
         SessionId ->
             Node = bondy_context:node(Ctxt),
             Pattern = bondy_registry_entry:key_pattern(
-                Type, RealmUri, Node, SessionId, '_'),
+                Type, RealmUri, Node, SessionId, '_'
+            ),
             MaybeFun = maybe_fun(Task, Ctxt),
             MatchOpts = [
                 {limit, 100},
@@ -353,7 +360,8 @@ when is_function(Task, 2) orelse Task == undefined ->
                 {remove_tombstones, true}
             ],
             Matches = plum_db:match(
-                full_prefix(Type, RealmUri), Pattern, MatchOpts),
+                full_prefix(Type, RealmUri), Pattern, MatchOpts
+            ),
             do_remove_all(Matches, SessionId, MaybeFun)
     end;
 
