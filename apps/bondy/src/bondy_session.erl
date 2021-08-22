@@ -31,8 +31,8 @@
 -define(SHUTDOWN_TIMEOUT, 5000).
 
 %% Sessions are store in an in-memory sharded ets table
--define(SPACE, ?MODULE).
--define(TAB(Id), tuplespace:locate_table(?SPACE, Id)).
+-define(SESSION_SPACE_NAME, ?MODULE).
+-define(TAB(Id), tuplespace:locate_table(?SESSION_SPACE_NAME, Id)).
 
 -define(SESSION_SEQ_POS, #bondy_session.seq).
 
@@ -158,6 +158,7 @@
 -export([subprotocol/1]).
 -export([take_meta/2]).
 -export([username/1]).
+-export([rbac_context/1]).
 
 -compile({no_auto_import, [node/1]}).
 
@@ -715,7 +716,7 @@ incr_seq(Id) when is_integer(Id), Id >= 0 ->
 -spec count() -> non_neg_integer().
 
 count() ->
-    tuplespace:size(?SPACE).
+    tuplespace:size(?SESSION_SPACE_NAME).
 
 
 %% -----------------------------------------------------------------------------
@@ -781,7 +782,7 @@ fetch(Id) when is_integer(Id) ->
 -spec list() -> [t()].
 
 list() ->
-    Tabs = tuplespace:tables(?SPACE),
+    Tabs = tuplespace:tables(?SESSION_SPACE_NAME),
     lists:append([ets:tab2list(T) || T <- Tabs]).
 
 
@@ -822,7 +823,7 @@ list_connections(N) ->
     [bondy_connection:t()].
 
 list_connections(RealmUri, N) when is_integer(N), N >= 1 ->
-    Tabs = tuplespace:tables(?SPACE),
+    Tabs = tuplespace:tables(?SESSION_SPACE_NAME),
     do_list_connections(Tabs, RealmUri, N).
 
 
@@ -1138,6 +1139,38 @@ select_pattern() ->
         Pattern ->
             Pattern
     end.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec rbac_context(id() | t()) -> bondy_rbac:context().
+
+rbac_context(#session{id = Id} = Session) ->
+    Tab = tuplespace:locate_table(?SESSION_SPACE_NAME, Id),
+
+    case ets:lookup_element(Tab, Id, #session.rbac_context) of
+        undefined ->
+            RealmUri = Session#session.realm_uri,
+            Authid = Session#session.authid,
+            NewCtxt = bondy_rbac:get_context(RealmUri, Authid),
+            ok = update_context(Id, NewCtxt),
+            NewCtxt;
+        Ctxt ->
+            refresh_context(Id, Ctxt)
+    end;
+
+rbac_context(Id) when is_integer(Id) ->
+    Tab = tuplespace:locate_table(?SESSION_SPACE_NAME, Id),
+
+    case ets:lookup_element(Tab, Id, #session.rbac_context) of
+        undefined ->
+            rbac_context(fetch(Id));
+        Ctxt ->
+            refresh_context(Id, Ctxt)
+    end.
+
 
 
 %% =============================================================================
