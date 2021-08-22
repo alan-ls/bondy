@@ -32,6 +32,7 @@
 -export([strict_username/1]).
 -export([username/1]).
 -export([usernames/1]).
+-export([peername/1]).
 
 
 
@@ -56,6 +57,43 @@ cidr(Bin) when is_binary(Bin) ->
         error:badarg ->
             false
     end;
+
+cidr({IP, PrefixLen}) when PrefixLen >= 0 ->
+    case inet:ntoa(IP) of
+        {error, einval} -> false;
+        _ -> true
+    end;
+
+cidr(_) ->
+    false.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec peername({inet:ip_address() | binary(), inet:port_number()}) ->
+    {ok, {inet:ip_address(), inet:port_number()}} | boolean().
+
+peername({IP, Port})
+when is_tuple(IP) andalso Port >= 0 andalso Port =< 65535 ->
+    case inet:ntoa(IP) of
+        {error, einval} -> false;
+        _ -> true
+    end;
+
+peername({Bin, Port})
+when is_binary(Bin) andalso Port >= 0 andalso Port =< 65535 ->
+    case inet:parse_address(Bin) of
+        {ok, IP} ->
+            {ok, {IP, Port}};
+        {error, _} ->
+            false
+    end;
+
+peername(_) ->
+    false.
+
 
 cidr(Term)  ->
     bondy_cidr:is_type(Term).
